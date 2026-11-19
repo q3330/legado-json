@@ -1,0 +1,688 @@
+package io.legado.app.ui.book.read.page
+
+import android.annotation.SuppressLint
+import android.content.Context
+import android.content.res.ColorStateList
+import android.graphics.Canvas
+import android.graphics.Rect
+import android.graphics.drawable.LayerDrawable
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.FrameLayout
+import androidx.core.content.ContextCompat
+import androidx.core.graphics.drawable.toDrawable
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.isGone
+import androidx.core.view.isInvisible
+import androidx.core.view.isVisible
+import io.legado.app.R
+import io.legado.app.constant.AppConst.timeFormat
+import io.legado.app.data.entities.Bookmark
+import io.legado.app.databinding.ViewBookPageBinding
+import io.legado.app.help.config.AppConfig
+import io.legado.app.help.config.ReadBookConfig
+import io.legado.app.help.config.ReadTipConfig
+import io.legado.app.model.ReadBook
+import io.legado.app.ui.book.read.ReadBookActivity
+import io.legado.app.ui.book.read.applyReadStatusBarPadding
+import io.legado.app.ui.book.read.page.api.ReaderSelection
+import io.legado.app.ui.book.read.page.entities.TextLine
+import io.legado.app.ui.book.read.page.entities.TextPage
+import io.legado.app.ui.book.read.page.entities.TextPos
+import io.legado.app.ui.book.read.page.provider.ChapterProvider
+import io.legado.app.ui.widget.BatteryView
+import io.legado.app.utils.activity
+import io.legado.app.utils.applyNavigationBarPadding
+import io.legado.app.utils.dpToPx
+import io.legado.app.utils.gone
+import io.legado.app.utils.setOnApplyWindowInsetsListenerCompat
+import io.legado.app.utils.setTextIfNotEqual
+import splitties.views.backgroundColor
+import java.util.Date
+import kotlin.math.ceil
+
+/**
+ * 页面视图
+ */
+class PageView(context: Context) : FrameLayout(context) {
+
+    private val binding = ViewBookPageBinding.inflate(LayoutInflater.from(context), this, true)
+    private val readBookActivity get() = activity as? ReadBookActivity
+    private var readerOverlayVisible = false
+    private val headerBackBounds = Rect()
+    private val externalDrawBounds = Rect()
+    private var battery = 100
+    private var tvTitle: BatteryView? = null
+    private var tvTime: BatteryView? = null
+    private var tvBattery: BatteryView? = null
+    private var tvBatteryP: BatteryView? = null
+    private var tvPage: BatteryView? = null
+    private var tvTotalProgress: BatteryView? = null
+    private var tvTotalProgress1: BatteryView? = null
+    private var tvPageAndTotal: BatteryView? = null
+    private var tvBookName: BatteryView? = null
+    private var tvTimeBattery: BatteryView? = null
+    private var tvTimeBatteryP: BatteryView? = null
+    private var isMainView = false
+    var isScroll = false
+
+    internal val contentViewport get() = binding.contentTextView
+
+    private var layoutPageLabel: Pair<Int, Int>? = null
+
+    internal fun setLayoutPageLabel(index: Int, count: Int) {
+        layoutPageLabel = if (count > 0) index to count else null
+        if (count > 0) {
+            tvPage?.setTextIfNotEqual("$index/$count")
+            tvPageAndTotal?.setTextIfNotEqual("$index/$count  ${ReadBook.curTextChapter?.getPageByReadPos(ReadBook.durChapterPos)?.readProgress.orEmpty()}")
+        }
+    }
+
+    val headerHeight: Int
+        get() {
+            val h1 = if (binding.vwStatusBar.isGone) 0 else binding.vwStatusBar.height
+            val h2 = if (binding.llHeader.isGone) 0 else binding.llHeader.height
+            val imageHeight = if (binding.ivHeaderImage.isGone) 0 else binding.ivHeaderImage.height
+            return h1 + h2 + imageHeight + binding.vwRoot.paddingTop
+        }
+    val imgBgPaddingStart: Int
+        get() {
+            return binding.vwRoot.paddingStart
+        }
+
+    init {
+        if (!isInEditMode) {
+            upStyle()
+            binding.ivHeaderBack.setOnClickListener {
+                if (isMainView && binding.llHeader.isVisible && binding.ivHeaderBack.isVisible) {
+                    // Explicit exit: retain finish() bookkeeping without the return-key lock.
+                    readBookActivity?.finish()
+                }
+            }
+            binding.vwStatusBar.applyReadStatusBarPadding()
+            binding.vwNavigationBar.applyNavigationBarPadding()
+        }
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        upBg()
+    }
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        val imageLimit = MeasureSpec.getSize(heightMeasureSpec) / 2
+        val headerLimitChanged = binding.ivHeaderImage.limitHeight(imageLimit)
+        val footerLimitChanged = binding.ivFooterImage.limitHeight(imageLimit)
+        if (headerLimitChanged || footerLimitChanged) {
+            binding.vwRoot.forceLayout()
+        }
+        super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+        fun visibleHeight(view: View) = if (view.isGone) 0 else view.measuredHeight
+        val headerImageHeight = visibleHeight(binding.ivHeaderImage)
+        val footerImageHeight = visibleHeight(binding.ivFooterImage)
+        if (headerImageHeight <= 0 && footerImageHeight <= 0) return
+        val contentMetrics = ChapterProvider.contentPaint.fontMetrics
+        val titleMetrics = ChapterProvider.titlePaint.fontMetrics
+        val titleScale = if (ReadBookConfig.config.titleSegType != 0) {
+            ReadBookConfig.config.titleSegScaling.takeIf { it.isFinite() }?.coerceIn(1f, 2f) ?: 1f
+        } else 1f
+        val lineHeight = ceil(maxOf(
+            contentMetrics.bottom - contentMetrics.top,
+            (titleMetrics.bottom - titleMetrics.top) * titleScale,
+        )).toInt().coerceAtLeast(1)
+        val minimumBodyHeight = ReadBookConfig.paddingTop.dpToPx().coerceAtLeast(0) +
+            ReadBookConfig.paddingBottom.dpToPx().coerceAtLeast(0) + lineHeight + 1
+        val chromeHeight = visibleHeight(binding.vwStatusBar) + visibleHeight(binding.llHeader) +
+            visibleHeight(binding.vwTopDivider) + visibleHeight(binding.vwBottomDivider) +
+            visibleHeight(binding.llFooter) + visibleHeight(binding.vwNavigationBar) +
+            binding.vwRoot.paddingTop + binding.vwRoot.paddingBottom
+        val available = (binding.vwRoot.measuredHeight - chromeHeight - minimumBodyHeight).coerceAtLeast(0)
+        val (headerHeight, footerHeight) = readDecorationImageHeights(
+            headerImageHeight, footerImageHeight, available,
+        )
+        if (headerHeight != headerImageHeight || footerHeight != footerImageHeight) {
+            binding.ivHeaderImage.limitHeight(headerHeight)
+            binding.ivFooterImage.limitHeight(footerHeight)
+            binding.vwRoot.forceLayout()
+            // Both measurements precede layout, so the reader sees only the final viewport.
+            super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+        }
+    }
+
+    fun upStyle() = binding.run {
+        upTipStyle()
+        ReadBookConfig.let {
+            ivHeaderImage.updateImage(
+                it.config.headerImage,
+                it.config.headerImageWidth,
+                it.config.headerImageHeight,
+            )
+            ivFooterImage.updateImage(
+                it.config.footerImage,
+                it.config.footerImageWidth,
+                it.config.footerImageHeight,
+            )
+            if (it.config.headerImage.isNotBlank() || it.config.footerImage.isNotBlank()) requestLayout()
+            val textColor = it.textColor
+            val tipDividerColor = with(ReadTipConfig) {
+                when (tipDividerColor) {
+                    -1 -> ContextCompat.getColor(context, R.color.divider)
+                    0 -> textColor
+                    else -> tipDividerColor
+                }
+            }
+            tvHeaderLeft.setColor(it.tipHeaderColor)
+            tvHeaderMiddle.setColor(it.tipHeaderColor)
+            tvHeaderRight.setColor(it.tipHeaderColor)
+            ivHeaderBack.imageTintList = ColorStateList.valueOf(it.tipHeaderColor)
+            ivHeaderBack.layoutParams = ivHeaderBack.layoutParams.apply {
+                val originalWidth = (tvHeaderLeft.textSize * 2f).toInt()
+                    .coerceAtLeast(24.dpToPx())
+                // Crop horizontal drawable whitespace while keeping the glyph in place.
+                width = originalWidth / 2
+                (this as ViewGroup.MarginLayoutParams).leftMargin = originalWidth / 4
+            }
+            tvFooterLeft.setColor(it.tipFooterColor)
+            tvFooterMiddle.setColor(it.tipFooterColor)
+            tvFooterRight.setColor(it.tipFooterColor)
+            vwTopDivider.backgroundColor = tipDividerColor
+            vwBottomDivider.backgroundColor = tipDividerColor
+            upStatusBar()
+            upNavigationBar()
+            upPaddingDisplayCutouts()
+            llHeader.setPadding(
+                it.headerPaddingLeft.dpToPx(),
+                it.headerPaddingTop.dpToPx(),
+                it.headerPaddingRight.dpToPx(),
+                it.headerPaddingBottom.dpToPx()
+            )
+            llFooter.setPadding(
+                it.footerPaddingLeft.dpToPx(),
+                it.footerPaddingTop.dpToPx(),
+                it.footerPaddingRight.dpToPx(),
+                it.footerPaddingBottom.dpToPx()
+            )
+            vwTopDivider.gone(llHeader.isGone || !it.showHeaderLine)
+            vwBottomDivider.gone(llFooter.isGone || !it.showFooterLine)
+        }
+        upTime()
+        upBattery(battery)
+    }
+
+    /**
+     * 显示状态栏时隐藏header
+     */
+    fun upStatusBar() = with(binding.vwStatusBar) {
+//        setPadding(paddingLeft, context.statusBarHeight, paddingRight, paddingBottom)
+        isGone = ReadBookConfig.hideStatusBar || readBookActivity?.isInMultiWindow == true
+    }
+
+    fun upNavigationBar() {
+        binding.vwNavigationBar.isGone = AppConfig.hideSystemNavigationBar
+    }
+
+    fun upPaddingDisplayCutouts() {
+        if (ReadBookConfig.isNineBgImg) {
+            ViewCompat.setOnApplyWindowInsetsListener(binding.vwRoot, null)
+            return
+        }
+        if (AppConfig.paddingDisplayCutouts) {
+            binding.vwRoot.setOnApplyWindowInsetsListenerCompat { _, windowInsets ->
+                val insets = windowInsets.getInsets(WindowInsetsCompat.Type.displayCutout())
+                binding.vwRoot.setPadding(
+                    insets.left,
+                    if (binding.vwStatusBar.isGone) insets.top else 0,
+                    insets.right,
+                    insets.bottom
+                )
+                windowInsets
+            }
+        } else {
+            ViewCompat.setOnApplyWindowInsetsListener(binding.vwRoot, null)
+            binding.vwRoot.setPadding(0, 0, 0, 0)
+        }
+    }
+
+    /**
+     * 更新阅读信息
+     */
+    private fun upTipStyle() = binding.run {
+        tvHeaderLeft.tag = null
+        tvHeaderMiddle.tag = null
+        tvHeaderRight.tag = null
+        tvFooterLeft.tag = null
+        tvFooterMiddle.tag = null
+        tvFooterRight.tag = null
+        upTipVisibility()
+        llFooter.isGone = when (ReadTipConfig.footerMode) {
+            1 -> true
+            else -> false
+        }
+        ReadTipConfig.apply {
+            ivHeaderBack.isGone = !showHeaderBackButton
+            // Retain the normal text line height when the arrow is the only header content.
+            tvHeaderLeft.isGone = tipHeaderLeft == none && !showHeaderBackButton
+            if (showHeaderBackButton) {
+                tvHeaderLeft.isInvisible = tipHeaderLeft == none
+            }
+            tvHeaderRight.isGone = tipHeaderRight == none
+            tvHeaderMiddle.isGone = tipHeaderMiddle == none
+            tvFooterLeft.isInvisible = tipFooterLeft == none
+            tvFooterRight.isGone = tipFooterRight == none
+            tvFooterMiddle.isGone = tipFooterMiddle == none
+        }
+        tvTitle = getTipView(ReadTipConfig.chapterTitle)?.apply {
+            tag = ReadTipConfig.chapterTitle
+            isBattery = false
+            typeface = ChapterProvider.typeface
+            textSize = 12f
+        }
+        tvTime = getTipView(ReadTipConfig.time)?.apply {
+            tag = ReadTipConfig.time
+            isBattery = false
+            typeface = ChapterProvider.typeface
+            textSize = 12f
+        }
+        tvBattery = getTipView(ReadTipConfig.battery)?.apply {
+            tag = ReadTipConfig.battery
+            isBattery = true
+            textSize = 11f
+        }
+        tvPage = getTipView(ReadTipConfig.page)?.apply {
+            tag = ReadTipConfig.page
+            isBattery = false
+            typeface = ChapterProvider.typeface
+            textSize = 12f
+        }
+        tvTotalProgress = getTipView(ReadTipConfig.totalProgress)?.apply {
+            tag = ReadTipConfig.totalProgress
+            isBattery = false
+            typeface = ChapterProvider.typeface
+            textSize = 12f
+        }
+        tvTotalProgress1 = getTipView(ReadTipConfig.totalProgress1)?.apply {
+            tag = ReadTipConfig.totalProgress1
+            isBattery = false
+            typeface = ChapterProvider.typeface
+            textSize = 12f
+        }
+        tvPageAndTotal = getTipView(ReadTipConfig.pageAndTotal)?.apply {
+            tag = ReadTipConfig.pageAndTotal
+            isBattery = false
+            typeface = ChapterProvider.typeface
+            textSize = 12f
+        }
+        tvBookName = getTipView(ReadTipConfig.bookName)?.apply {
+            tag = ReadTipConfig.bookName
+            isBattery = false
+            typeface = ChapterProvider.typeface
+            textSize = 12f
+        }
+        tvTimeBattery = getTipView(ReadTipConfig.timeBattery)?.apply {
+            tag = ReadTipConfig.timeBattery
+            isBattery = true
+            typeface = ChapterProvider.typeface
+            textSize = 11f
+        }
+        tvBatteryP = getTipView(ReadTipConfig.batteryPercentage)?.apply {
+            tag = ReadTipConfig.batteryPercentage
+            isBattery = false
+            typeface = ChapterProvider.typeface
+            textSize = 12f
+        }
+        tvTimeBatteryP = getTipView(ReadTipConfig.timeBatteryPercentage)?.apply {
+            tag = ReadTipConfig.timeBatteryPercentage
+            isBattery = false
+            typeface = ChapterProvider.typeface
+            textSize = 12f
+        }
+        val headerTypeface = ChapterProvider.loadOptionalTypeface(ReadBookConfig.headerFont)
+            ?: ChapterProvider.typeface
+        val footerTypeface = if (ReadBookConfig.applyHeaderStyle) {
+            headerTypeface
+        } else {
+            ChapterProvider.loadOptionalTypeface(ReadBookConfig.footerFont)
+                ?: ChapterProvider.typeface
+        }
+        listOf(tvHeaderLeft, tvHeaderMiddle, tvHeaderRight).forEach { view ->
+            view.typeface = headerTypeface
+            view.textSize = ReadBookConfig.headerFontSize.toFloat()
+        }
+        listOf(tvFooterLeft, tvFooterMiddle, tvFooterRight).forEach { view ->
+            view.typeface = footerTypeface
+            view.textSize = if (ReadBookConfig.applyHeaderStyle) {
+                ReadBookConfig.headerFontSize.toFloat()
+            } else {
+                ReadBookConfig.footerFontSize.toFloat()
+            }
+        }
+    }
+
+    fun upTipVisibility(readerOverlayVisible: Boolean = this.readerOverlayVisible) {
+        this.readerOverlayVisible = readerOverlayVisible
+        val headerEnabled = ReadTipConfig.headerMode == 1 && ReadBookConfig.hideStatusBar
+        binding.llHeader.isGone = !headerEnabled
+        if (headerEnabled) {
+            binding.llHeader.isInvisible = readerOverlayVisible
+        }
+    }
+
+    /**
+     * 获取信息视图
+     * @param tip 信息类型
+     */
+    private fun getTipView(tip: Int): BatteryView? = binding.run {
+        return when (tip) {
+            ReadTipConfig.tipHeaderLeft -> tvHeaderLeft
+            ReadTipConfig.tipHeaderMiddle -> tvHeaderMiddle
+            ReadTipConfig.tipHeaderRight -> tvHeaderRight
+            ReadTipConfig.tipFooterLeft -> tvFooterLeft
+            ReadTipConfig.tipFooterMiddle -> tvFooterMiddle
+            ReadTipConfig.tipFooterRight -> tvFooterRight
+            else -> null
+        }
+    }
+
+    /**
+     * 更新背景
+     */
+    fun upBg() {
+        binding.vwRoot.background = LayerDrawable(
+            arrayOf(
+                ReadBookConfig.bgMeanColor.toDrawable(),
+                ReadBookConfig.bg
+            )
+        )
+        upBgAlpha()
+    }
+
+    /** The external document paints above the preset, with the existing information views on top. */
+    internal fun drawPageBackground(canvas: Canvas) {
+        val root = binding.vwRoot
+        val drawable = root.background ?: return
+        val saved = canvas.save()
+        root.getDrawingRect(externalDrawBounds)
+        offsetDescendantRectToMyCoords(root, externalDrawBounds)
+        canvas.translate(externalDrawBounds.left.toFloat(), externalDrawBounds.top.toFloat())
+        drawable.setBounds(0, 0, root.width, root.height)
+        drawable.draw(canvas)
+        canvas.restoreToCount(saved)
+    }
+
+    internal fun drawInformation(canvas: Canvas, hideHeader: Boolean, hideFooter: Boolean) {
+        fun draw(view: View) {
+            if (!view.isVisible) return
+            val saved = canvas.save()
+            view.getDrawingRect(externalDrawBounds)
+            offsetDescendantRectToMyCoords(view, externalDrawBounds)
+            canvas.translate(externalDrawBounds.left.toFloat(), externalDrawBounds.top.toFloat())
+            view.draw(canvas)
+            canvas.restoreToCount(saved)
+        }
+        if (!hideHeader) {
+            draw(binding.ivHeaderImage)
+            draw(binding.llHeader)
+            draw(binding.vwTopDivider)
+        }
+        if (!hideFooter) {
+            draw(binding.ivFooterImage)
+            draw(binding.llFooter)
+            draw(binding.vwBottomDivider)
+        }
+    }
+
+    /**
+     * 更新背景透明度
+     */
+    fun upBgAlpha() {
+        ReadBookConfig.bg?.alpha = (ReadBookConfig.bgAlpha / 100f * 255).toInt()
+        binding.vwRoot.invalidate()
+    }
+
+    /**
+     * 更新时间信息
+     */
+    fun upTime() {
+        tvTime?.text = timeFormat.format(Date(System.currentTimeMillis()))
+        upTimeBattery()
+    }
+
+    /**
+     * 更新电池信息
+     */
+    @SuppressLint("SetTextI18n")
+    fun upBattery(battery: Int) {
+        this.battery = battery
+        tvBattery?.setBattery(battery)
+        tvBatteryP?.text = "$battery%"
+        upTimeBattery()
+    }
+
+    /**
+     * 更新电池信息
+     */
+    @SuppressLint("SetTextI18n")
+    private fun upTimeBattery() {
+        val time = timeFormat.format(Date(System.currentTimeMillis()))
+        tvTimeBattery?.setBattery(battery, time)
+        tvTimeBatteryP?.text = "$time $battery%"
+    }
+
+    /**
+     * 设置内容
+     */
+    fun setContent(textPage: TextPage, resetPageOffset: Boolean = true) {
+        if (isMainView && !isScroll) {
+            setProgress(textPage)
+        } else {
+            post {
+                setProgress(textPage)
+            }
+        }
+        if (resetPageOffset) {
+            resetPageOffset()
+        }
+        binding.contentTextView.setContent(textPage)
+    }
+
+    fun invalidateContentView() {
+        binding.contentTextView.invalidate()
+    }
+
+    fun setSelectionHighlightTransparent(transparent: Boolean) {
+        binding.contentTextView.setSelectionHighlightTransparent(transparent)
+    }
+
+    /**
+     * 设置无障碍文本
+     */
+    fun setContentDescription(content: String) {
+        binding.contentTextView.contentDescription = content
+    }
+
+    /**
+     * 重置滚动位置
+     */
+    fun resetPageOffset() {
+        binding.contentTextView.resetPageOffset()
+    }
+
+    /**
+     * 设置进度
+     */
+    @SuppressLint("SetTextI18n")
+    fun setProgress(textPage: TextPage) = textPage.apply {
+        tvBookName?.setTextIfNotEqual(ReadBook.book?.name)
+        tvTitle?.setTextIfNotEqual(textPage.title)
+        val readProgress = readProgress
+        tvTotalProgress?.setTextIfNotEqual(readProgress)
+        tvTotalProgress1?.setTextIfNotEqual("${chapterIndex.plus(1)}/${chapterSize}")
+        val displayed = layoutPageLabel
+        if (displayed != null) {
+            tvPageAndTotal?.setTextIfNotEqual("${displayed.first}/${displayed.second}  $readProgress")
+            tvPage?.setTextIfNotEqual("${displayed.first}/${displayed.second}")
+        } else if (textChapter.isCompleted) {
+            tvPageAndTotal?.setTextIfNotEqual("${index.plus(1)}/$pageSize  $readProgress")
+            tvPage?.setTextIfNotEqual("${index.plus(1)}/$pageSize")
+        } else {
+            val pageSizeInt = pageSize
+            val pageSize = if (pageSizeInt <= 0) "-" else "~$pageSizeInt"
+            tvPageAndTotal?.setTextIfNotEqual("${index.plus(1)}/$pageSize  $readProgress")
+            tvPage?.setTextIfNotEqual("${index.plus(1)}/$pageSize")
+        }
+    }
+
+    fun setAutoPager(autoPager: AutoPager?) {
+        binding.contentTextView.setAutoPager(autoPager)
+    }
+
+    fun submitRenderTask() {
+        binding.contentTextView.submitRenderTask()
+    }
+
+    fun setIsScroll(value: Boolean) {
+        isScroll = value
+        binding.contentTextView.setIsScroll(value)
+    }
+
+    /**
+     * 滚动事件
+     */
+    fun scroll(offset: Int) {
+        binding.contentTextView.scroll(offset)
+    }
+
+    /**
+     * 更新是否开启选择功能
+     */
+    fun upSelectAble(selectAble: Boolean) {
+        binding.contentTextView.selectAble = selectAble
+    }
+
+    fun setTextHighlights(bookmarks: List<Bookmark>) {
+        binding.contentTextView.setTextHighlights(bookmarks)
+    }
+
+    /**
+     * 优先处理页面内单击
+     * @return true:已处理, false:未处理
+     */
+    fun onClick(x: Float, y: Float, upX: Float = x, upY: Float = y): Boolean {
+        if (isMainView && binding.llHeader.isVisible && binding.ivHeaderBack.isVisible) {
+            binding.ivHeaderBack.getDrawingRect(headerBackBounds)
+            offsetDescendantRectToMyCoords(binding.ivHeaderBack, headerBackBounds)
+            if (headerBackBounds.contains(x.toInt(), y.toInt())) {
+                if (headerBackBounds.contains(upX.toInt(), upY.toInt())) {
+                    binding.ivHeaderBack.performClick()
+                }
+                return true
+            }
+        }
+        return binding.contentTextView.click(x - imgBgPaddingStart, y - headerHeight)
+    }
+
+    /**
+     * 长按事件
+     */
+    fun longPress(
+        x: Float, y: Float,
+        select: (textPos: TextPos) -> Unit,
+    ) {
+        return binding.contentTextView.longPress(x - imgBgPaddingStart, y - headerHeight, select)
+    }
+
+    /**
+     * 选择文本
+     */
+    fun selectText(
+        x: Float, y: Float,
+        select: (textPos: TextPos) -> Unit,
+    ) {
+        return binding.contentTextView.selectText(x - imgBgPaddingStart, y - headerHeight, select)
+    }
+
+    fun getCurVisiblePage(): TextPage {
+        return binding.contentTextView.getCurVisiblePage()
+    }
+
+    fun getReadAloudPos(): Pair<Int, TextLine>? {
+        return binding.contentTextView.getReadAloudPos()
+    }
+
+    fun markAsMainView() {
+        isMainView = true
+        binding.contentTextView.isMainView = true
+    }
+
+    fun selectStartMove(x: Float, y: Float) {
+        binding.contentTextView.selectStartMove(x - imgBgPaddingStart, y - headerHeight)
+    }
+
+    fun selectStartMoveIndex(
+        relativePagePos: Int,
+        lineIndex: Int,
+        charIndex: Int
+    ) {
+        binding.contentTextView.selectStartMoveIndex(relativePagePos, lineIndex, charIndex)
+    }
+
+    fun selectStartMoveIndex(textPos: TextPos) {
+        binding.contentTextView.selectStartMoveIndex(textPos)
+    }
+
+    fun selectEndMove(x: Float, y: Float) {
+        binding.contentTextView.selectEndMove(x - imgBgPaddingStart, y - headerHeight)
+    }
+
+    fun selectEndMoveIndex(
+        relativePagePos: Int,
+        lineIndex: Int,
+        charIndex: Int
+    ) {
+        binding.contentTextView.selectEndMoveIndex(relativePagePos, lineIndex, charIndex)
+    }
+
+    fun selectEndMoveIndex(textPos: TextPos) {
+        binding.contentTextView.selectEndMoveIndex(textPos)
+    }
+
+    fun getReverseStartCursor(): Boolean {
+        return binding.contentTextView.reverseStartCursor
+    }
+
+    fun getReverseEndCursor(): Boolean {
+        return binding.contentTextView.reverseEndCursor
+    }
+
+    fun isLongScreenShot(): Boolean {
+        return binding.contentTextView.longScreenshot
+    }
+
+    fun resetReverseCursor() {
+        binding.contentTextView.resetReverseCursor()
+    }
+
+    fun cancelSelect(clearSearchResult: Boolean = false) {
+        binding.contentTextView.cancelSelect(clearSearchResult)
+    }
+
+    fun bookmarkSelection(): ReaderSelection {
+        return binding.contentTextView.bookmarkSelection()
+    }
+
+    fun highlightSelection(): ReaderSelection? {
+        return binding.contentTextView.highlightSelection()
+    }
+
+    fun relativePage(relativePagePos: Int): TextPage {
+        return binding.contentTextView.relativePage(relativePagePos)
+    }
+
+    val textPage get() = binding.contentTextView.textPage
+
+    val selectedText: String get() = binding.contentTextView.getSelectedText()
+
+    val selectStartPos get() = binding.contentTextView.selectStart
+}

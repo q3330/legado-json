@@ -1,0 +1,358 @@
+package io.legado.app.service
+
+import android.app.PendingIntent
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
+import androidx.lifecycle.lifecycleScope
+import io.legado.app.R
+import io.legado.app.constant.AppConst
+import io.legado.app.constant.AppLog
+import io.legado.app.constant.AppPattern
+import io.legado.app.exception.NoStackTraceException
+import io.legado.app.help.MediaHelp
+import io.legado.app.help.config.AppConfig
+import io.legado.app.help.coroutine.Coroutine
+import io.legado.app.help.tts.TtsEngineSetting
+import io.legado.app.help.tts.TtsEngineType
+import io.legado.app.lib.dialogs.SelectItem
+import io.legado.app.model.ReadAloud
+import io.legado.app.model.ReadBook
+import io.legado.app.utils.GSON
+import io.legado.app.utils.LogUtils
+import io.legado.app.utils.fromJsonObject
+import io.legado.app.utils.servicePendingIntent
+import io.legado.app.utils.toastOnUi
+import kotlinx.coroutines.Dispatchers.Main
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicLong
+
+/**
+ * 本地朗读
+ */
+class TTSReadAloudService : BaseReadAloudService(), TextToSpeech.OnInitListener {
+
+    private var textToSpeech: TextToSpeech? = null
+    private var ttsInitFinish = false
+    private val ttsUtteranceListener = TTSUtteranceListener()
+    private var speakJob: Coroutine<*>? = null
+    private val utteranceGeneration = AtomicLong()
+    private var dailyReadingUtterance: String? = null
+    private val TAG = "TTSReadAloudService"
+
+    override fun onCreate() {
+        super.onCreate()
+        kotlin.runCatching {
+            initTts()
+        }.onFailure {
+            AppLog.put("${getString(R.string.tts_init_failed)}\n$it", it, true)
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        clearTTS()
+    }
+
+    @Synchronized
+    private fun initTts() {
+        ttsInitFinish = false
+        val preparedEngine = ReadAloud.preparedTtsEngineV2
+        val engine = if (preparedEngine.type == TtsEngineType.SYSTEM) {
+            preparedEngine.enginePackage
+        } else {
+            GSON.fromJsonObject<SelectItem<String>>(ReadAloud.ttsEngine).getOrNull()?.value
+        }
+        LogUtils.d(TAG, "initTts engine:$engine")
+        textToSpeech = if (engine.isNullOrBlank()) {
+            TextToSpeech(this, this)
+        } else {
+            TextToSpeech(this, this, engine)
+        }
+        upSpeechRate()
+    }
+
+    @Synchronized
+    fun clearTTS() {
+        invalidateUtterances()
+        textToSpeech?.runCatching {
+            stop()
+            shutdown()
+        }
+        textToSpeech = null
+        ttsInitFinish = false
+    }
+
+    override fun onInit(status: Int) {
+        if (status == TextToSpeech.SUCCESS) {
+            textToSpeech?.let {
+                it.setOnUtteranceProgressListener(ttsUtteranceListener)
+                ttsInitFinish = true
+                play()
+            }
+        } else {
+            toastOnUi(R.string.tts_init_failed)
+        }
+    }
+
+    @Synchronized
+    override fun play() {
+        if (!ttsInitFinish) return
+        if (!requestFocus()) return
+        if (contentList.isEmpty()) {
+            AppLog.putDebug("朗读列表为空")
+            ReadBook.readAloud(engineVerified = true)
+            return
+        }
+        super.play()
+        dailyReadingUtterance = null
+        MediaHelp.playSilentSound(this@TTSReadAloudService)
+        speakJob?.cancel()
+        val generation = utteranceGeneration.incrementAndGet()
+        speakJob = execute {
+            LogUtils.d(TAG, "朗读列表大小 ${contentList.size}")
+            LogUtils.d(TAG, "朗读页数 ${textChapter?.pageSize}")
+            val tts = textToSpeech ?: throw NoStackTraceException("tts is null")
+            val contentList = contentList
+            var isAddedText = false
+            for (i in nowSpeak until contentList.size) {
+                ensureActive()
+                val text = getReadAloudText(i)
+                if (text.isBlank() || text.matches(AppPattern.notReadAloudRegex)) {
+                    continue
+                }
+                if (!isAddedText) {
+                    val result = tts.runCatching {
+                        speak(text, TextToSpeech.QUEUE_FLUSH, null, "${AppConst.APP_TAG}:$generation:$i")
+                    }.getOrElse {
+                        AppLog.put("tts出错\n${it.localizedMessage}", it, true)
+                        TextToSpeech.ERROR
+                    }
+                    if (result == TextToSpeech.ERROR) {
+                        AppLog.put("tts出错 尝试重新初始化")
+                        clearTTS()
+                        initTts()
+                        return@execute
+                    }
+                } else {
+                    val result = tts.runCatching {
+                        speak(text, TextToSpeech.QUEUE_ADD, null, "${AppConst.APP_TAG}:$generation:$i")
+                    }.getOrElse {
+                        AppLog.put("tts出错\n${it.localizedMessage}", it, true)
+                        TextToSpeech.ERROR
+                    }
+                    if (result == TextToSpeech.ERROR) {
+                        AppLog.put("tts朗读出错:$text")
+                    }
+                }
+                isAddedText = true
+            }
+            LogUtils.d(TAG, "朗读内容添加完成")
+            if (!isAddedText) {
+                playStop()
+                delay(1000)
+                nextChapter()
+            }
+        }.onError {
+            AppLog.put("tts朗读出错\n${it.localizedMessage}", it, true)
+        }
+    }
+
+    override fun playStop() {
+        onBgmSpeechWaiting()
+        invalidateUtterances()
+        textToSpeech?.runCatching {
+            stop()
+        }
+    }
+
+    override fun onNewReadAloudRequest() {
+        invalidateUtterances()
+    }
+
+    private fun invalidateUtterances() {
+        utteranceGeneration.incrementAndGet()
+        dailyReadingUtterance = null
+        speakJob?.cancel()
+    }
+
+    private fun finishDailyReadingUtterance(id: String?) {
+        if (id == null || id != dailyReadingUtterance) return
+        onBgmSpeechWaiting()
+        dailyReadingUtterance = null
+    }
+
+    private fun withCurrentUtterance(id: String?, action: () -> Unit) {
+        // Engines can finish an old utterance after QUEUE_FLUSH or stop().
+        // Validate on Main together with publication of new reading positions.
+        lifecycleScope.launch(Main.immediate) {
+            if (!ownsPlaybackState() || isPreparingReadAloud ||
+                id?.startsWith("${AppConst.APP_TAG}:${utteranceGeneration.get()}:") != true
+            ) return@launch
+            action()
+        }
+    }
+
+    /**
+     * 更新朗读速度
+     */
+    override fun upSpeechRate(reset: Boolean) {
+        if (reset) {
+            clearTTS()
+            initTts()
+        }
+        val engine = ReadAloud.preparedTtsEngineV2.takeIf { it.type == TtsEngineType.SYSTEM }
+        val engineBaseRate = systemEngineBaseRate(engine)
+        val enginePitch = systemEnginePitch(engine)
+        if (!AppConfig.ttsFlowSys || engineBaseRate != 1f) {
+            textToSpeech?.setSpeechRate(systemSpeechRate(engineBaseRate))
+        }
+        if (enginePitch != 1f) {
+            textToSpeech?.setPitch(enginePitch)
+        }
+    }
+
+    private fun systemSpeechRate(engineBaseRate: Float = systemEngineBaseRate()): Float {
+        val playerRate = if (AppConfig.ttsFlowSys) {
+            1f
+        } else {
+            (AppConfig.ttsSpeechRate + 5) / 10f
+        }
+        return (engineBaseRate * playerRate).coerceIn(0.1f, 5f)
+    }
+
+    private fun systemEngineBaseRate(
+        engine: TtsEngineSetting? =
+            ReadAloud.preparedTtsEngineV2.takeIf { it.type == TtsEngineType.SYSTEM }
+    ): Float {
+        return ((engine?.effectiveSpeed() ?: 50) / 50f).coerceIn(0.1f, 5f)
+    }
+
+    private fun systemEnginePitch(
+        engine: TtsEngineSetting? =
+            ReadAloud.preparedTtsEngineV2.takeIf { it.type == TtsEngineType.SYSTEM }
+    ): Float {
+        return ((engine?.effectivePitch() ?: 50) / 50f).coerceIn(0.1f, 2f)
+    }
+
+    /**
+     * 暂停朗读
+     */
+    override fun pauseReadAloud(abandonFocus: Boolean) {
+        invalidateUtterances()
+        super.pauseReadAloud(abandonFocus)
+        textToSpeech?.runCatching {
+            stop()
+        }
+    }
+
+    /**
+     * 恢复朗读
+     */
+    override fun resumeReadAloud() {
+        super.resumeReadAloud()
+        play()
+    }
+
+    /**
+     * 朗读监听
+     */
+    private inner class TTSUtteranceListener : UtteranceProgressListener() {
+
+        private val TAG = "TTSUtteranceListener"
+
+        override fun onStart(s: String) {
+            withCurrentUtterance(s) {
+                LogUtils.d(TAG, "onStart nowSpeak:$nowSpeak pageIndex:$pageIndex utteranceId:$s")
+                if (!syncActualPlaybackState(isPlaying = true)) return@withCurrentUtterance
+                dailyReadingUtterance = s
+                textChapter?.let {
+                    if (io.legado.app.BuildConfig.DEBUG && it.contentPositionMap != null) {
+                        android.util.Log.d("EpubAloudTrace", "tts-start chapter=${it.chapter.index} paragraph=$nowSpeak " +
+                            "speech=$readAloudNumber start=$paragraphStartPos length=${contentList.getOrNull(nowSpeak)?.length} " +
+                            "byPage=$readAloudByPage target=${readAloudNumber + 1}")
+                    }
+                    if (isReadAloudTextSilent()) {
+                        nextParagraph()
+                    }
+                    if (pageIndex + 1 < readAloudPageCount(it)
+                        && readAloudNumber + 1 > readAloudPageStart(it, pageIndex + 1)
+                    ) {
+                        pageIndex++
+                        moveReadAloudPage(true)
+                    }
+                    upTtsProgress(readAloudNumber + 1)
+                }
+            }
+        }
+
+        override fun onDone(s: String) {
+            withCurrentUtterance(s) {
+                finishDailyReadingUtterance(s)
+                LogUtils.d(TAG, "onDone utteranceId:$s")
+                nextParagraph()
+            }
+        }
+
+        override fun onStop(utteranceId: String?, interrupted: Boolean) {
+            withCurrentUtterance(utteranceId) {
+                finishDailyReadingUtterance(utteranceId)
+            }
+        }
+
+        override fun onRangeStart(utteranceId: String?, start: Int, end: Int, frame: Int) {
+            super.onRangeStart(utteranceId, start, end, frame)
+            withCurrentUtterance(utteranceId) {
+                val msg =
+                    "onRangeStart nowSpeak:$nowSpeak pageIndex:$pageIndex utteranceId:$utteranceId start:$start end:$end frame:$frame"
+                LogUtils.d(TAG, msg)
+                textChapter?.let {
+                    if (pageIndex + 1 < readAloudPageCount(it)
+                        && readAloudNumber + start > readAloudPageStart(it, pageIndex + 1)
+                    ) {
+                        pageIndex++
+                        moveReadAloudPage(true)
+                        upTtsProgress(readAloudNumber + start)
+                    }
+                    else if (needsLayoutProgress) upTtsProgress(readAloudNumber + start)
+                }
+            }
+        }
+
+        override fun onError(utteranceId: String?, errorCode: Int) {
+            withCurrentUtterance(utteranceId) {
+                finishDailyReadingUtterance(utteranceId)
+                LogUtils.d(
+                    TAG,
+                    "onError nowSpeak:$nowSpeak pageIndex:$pageIndex utteranceId:$utteranceId errorCode:$errorCode"
+                )
+                nextParagraph()
+            }
+        }
+
+        private fun nextParagraph() {
+            //跳过全标点段落
+            do {
+                if (!advanceReadAloudPosition()) {
+                    return
+                }
+            } while (isReadAloudTextSilent())
+        }
+
+        @Deprecated("Deprecated in Java")
+        override fun onError(s: String) {
+            withCurrentUtterance(s) {
+                finishDailyReadingUtterance(s)
+                LogUtils.d(TAG, "onError nowSpeak:$nowSpeak pageIndex:$pageIndex s:$s")
+                nextParagraph()
+            }
+        }
+
+    }
+
+    override fun aloudServicePendingIntent(actionStr: String): PendingIntent? {
+        return servicePendingIntent<TTSReadAloudService>(actionStr)
+    }
+
+}

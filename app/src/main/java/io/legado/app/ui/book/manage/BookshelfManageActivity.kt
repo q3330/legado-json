@@ -1,0 +1,547 @@
+package io.legado.app.ui.book.manage
+
+import android.os.Bundle
+import androidx.activity.viewModels
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.referentialEqualityPolicy
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.lifecycle.lifecycleScope
+import io.legado.app.R
+import io.legado.app.base.ComposeActivityBinding
+import io.legado.app.base.VMBaseActivity
+import io.legado.app.constant.AppLog
+import io.legado.app.constant.EventBus
+import io.legado.app.constant.IntentAction
+import io.legado.app.data.appDb
+import io.legado.app.data.entities.Book
+import io.legado.app.data.entities.BookChapter
+import io.legado.app.data.entities.BookGroup
+import io.legado.app.data.entities.BookSource
+import io.legado.app.help.book.contains
+import io.legado.app.help.book.menuCapabilities
+import io.legado.app.help.config.AppConfig
+import io.legado.app.help.config.LocalConfig
+import io.legado.app.model.CacheBook
+import io.legado.app.model.localBook.LocalBook
+import io.legado.app.model.remote.WebDavBookLocation
+import io.legado.app.ui.book.import.remote.RemoteBookActivity
+import io.legado.app.utils.longSnackbar
+import androidx.lifecycle.Lifecycle
+import io.legado.app.model.localBook.canExtractOriginalCover
+import io.legado.app.model.localBook.localBookCoverUpdates
+import io.legado.app.model.localBook.rebuildBookCovers
+import io.legado.app.service.ExportBookService
+import io.legado.app.ui.book.group.GroupManageDialog
+import io.legado.app.ui.book.info.BookInfoActivity
+import io.legado.app.ui.design.theme.NgAppTheme
+import io.legado.app.ui.main.bookshelf.BookshelfBookGroupSheet
+import io.legado.app.utils.ACache
+import io.legado.app.utils.CreateFileContract
+import io.legado.app.utils.SelectDirectoryContract
+import io.legado.app.utils.cnCompare
+import io.legado.app.utils.isContentScheme
+import io.legado.app.utils.observeEvent
+import io.legado.app.utils.sendToClip
+import io.legado.app.utils.share
+import io.legado.app.utils.showDialogFragment
+import io.legado.app.utils.startActivity
+import io.legado.app.utils.startService
+import io.legado.app.utils.toastOnUi
+import io.legado.app.utils.viewbindingdelegate.viewBinding
+import kotlinx.coroutines.Dispatchers.IO
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlin.math.max
+
+/** 书架管理。页面宿主、列表、选择与拖排均使用 Compose。 */
+class BookshelfManageActivity :
+    VMBaseActivity<ComposeActivityBinding, BookshelfManageViewModel>(),
+    SourcePickerDialog.Callback,
+    ExportSettingsDialog.Callback {
+
+    override val binding by viewBinding(ComposeActivityBinding::inflate)
+    override val viewModel by viewModels<BookshelfManageViewModel>()
+    override val bindNgToolbarMenu: Boolean = false
+
+    private val groupList: ArrayList<BookGroup> = arrayListOf()
+    private var isManualSort = false
+    private var booksFlowJob: Job? = null
+    private var coverUpdateJob: Job? = null
+    private var coverUpdateSelection by mutableStateOf<List<Book>?>(null)
+    private var topBarQuery by mutableStateOf("")
+    private var topBarGroups by mutableStateOf<List<BookGroup>>(emptyList())
+    private var topBarSelectedGroupId by mutableLongStateOf(BookGroup.IdAll)
+    private var books: List<Book> = emptyList()
+    private var visibleBooks by mutableStateOf<List<Book>>(
+        emptyList(),
+        referentialEqualityPolicy(),
+    )
+    private var selectedBookUrls by mutableStateOf<Set<String>>(emptySet())
+    private var cachedChapterCounts by mutableStateOf<Map<String, Int>>(emptyMap())
+    private var cacheChapterTotals by mutableStateOf<Map<String, Int>>(emptyMap())
+    private var clearableBookUrls by mutableStateOf<Set<String>>(emptySet())
+    private var cachedBytes by mutableStateOf<Map<String, Long>>(emptyMap())
+    private var sortOrder by mutableStateOf(BookshelfManageSort.FOLLOW_BOOKSHELF)
+    private var cacheReadError = false
+    private var reordering = false
+    private var pendingChangeSourceBooks: List<Book> = emptyList()
+    private var deleteDialogVisible by mutableStateOf(false)
+    private var deleteOriginal by mutableStateOf(false)
+    private var batchChangeSourceRunning by mutableStateOf(false)
+    private var batchChangeSourceProgress by mutableStateOf("")
+    private var exportedSourceUri by mutableStateOf<String?>(null)
+    private val exportBookPathKey = "exportBookPath"
+    private var pendingExportBooks: List<Book> = emptyList()
+    private var pendingExportSettings = ExportSettingsResult()
+    private val exportContentDir = registerForActivityResult(SelectDirectoryContract()) { result ->
+        val books = pendingExportBooks
+        if (books.isEmpty()) return@registerForActivityResult
+        result.uri?.let { uri ->
+            val path = if (uri.isContentScheme()) uri.toString() else uri.path ?: uri.toString()
+            ACache.get().put(exportBookPathKey, path)
+            startExportBooks(books, path, pendingExportSettings)
+        }
+    }
+    private val exportSourceFile = registerForActivityResult(CreateFileContract()) {
+        it.save(this, this) { uri ->
+            exportedSourceUri = uri.toString()
+        }
+    }
+
+    override fun onActivityCreated(savedInstanceState: Bundle?) {
+        viewModel.groupId = intent.getLongExtra("groupId", -1)
+        topBarSelectedGroupId = viewModel.groupId
+        sortOrder = viewModel.sortOrder
+        applyCacheStatistics(viewModel.cacheState.value)
+        initContent()
+        initGroupData()
+        upBookDataByGroupId()
+    }
+
+    override fun observeLiveBus() {
+        observeEvent<WebDavBookLocation>(EventBus.WEBDAV_EXPORT_READY) { location ->
+            if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) binding.root.longSnackbar(
+                getString(R.string.export_upload_success), getString(R.string.webdav_view_cloud)) {
+                RemoteBookActivity.open(this, location)
+            }
+        }
+        lifecycleScope.launch {
+            viewModel.cacheState.collect(::applyCacheStatistics)
+        }
+        viewModel.batchChangeSourceState.observe(this) {
+            batchChangeSourceRunning = it
+            if (!it) {
+                batchChangeSourceProgress = ""
+            }
+        }
+        viewModel.batchChangeSourceProcessLiveData.observe(this) {
+            batchChangeSourceProgress = it
+        }
+        observeEvent<Pair<Book, BookChapter>>(EventBus.SAVE_CONTENT) { (book, _) ->
+            if (books.any { it.bookUrl == book.bookUrl }) viewModel.refreshCache(book.bookUrl)
+        }
+        observeEvent<String>(EventBus.UP_DOWNLOAD) { bookUrl ->
+            // 活跃任务每秒都发进度，完成章节由 SAVE_CONTENT 刷新，避免反复扫盘。
+            if (bookUrl.isNotEmpty() && !CacheBook.cacheBookMap.containsKey(bookUrl)) {
+                viewModel.refreshCache(bookUrl)
+            }
+        }
+        observeEvent<String>(EventBus.BOOK_CACHE_CLEARED) { viewModel.refreshCache(it) }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        viewModel.refreshCache("")
+    }
+
+    private fun initContent() {
+        binding.composeView.setViewCompositionStrategy(
+            ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed,
+        )
+        binding.composeView.setContent {
+            NgAppTheme {
+                BookshelfManageScreen(
+                    query = topBarQuery,
+                    groups = topBarGroups,
+                    selectedGroupId = topBarSelectedGroupId,
+                    books = visibleBooks,
+                    selectedBookUrls = selectedBookUrls,
+                    cachedChapterCounts = cachedChapterCounts,
+                    cacheChapterTotals = cacheChapterTotals,
+                    clearableBookUrls = clearableBookUrls,
+                    cachedBytes = cachedBytes,
+                    sortOrder = sortOrder,
+                    coverUpdateSelection = coverUpdateSelection,
+                    deleteDialogVisible = deleteDialogVisible,
+                    deleteOriginal = deleteOriginal,
+                    batchChangeSourceRunning = batchChangeSourceRunning,
+                    batchChangeSourceProgress = batchChangeSourceProgress,
+                    exportedSourceUri = exportedSourceUri,
+                    onQueryChange = {
+                        topBarQuery = it
+                        updateVisibleBooks()
+                    },
+                    onBack = ::finish,
+                    onGroupSelected = { groupId ->
+                        viewModel.groupId = groupId
+                        topBarSelectedGroupId = groupId
+                        upBookDataByGroupId()
+                    },
+                    onGroupManage = { showDialogFragment<GroupManageDialog>() },
+                    onSortChange = {
+                        sortOrder = it
+                        viewModel.sortOrder = it
+                        updateVisibleBooks()
+                    },
+                    onSelectionChange = ::setBookSelected,
+                    onOpenDetails = ::openBook,
+                    onReorderStarted = ::prepareManualSort,
+                    onMove = ::moveBook,
+                    onReorderFinished = ::finishDrag,
+                    onSelectAll = ::selectAll,
+                    onInvertSelection = ::invertSelection,
+                    onDockAction = ::onDockAction,
+                    onDismissCoverUpdate = { coverUpdateSelection = null },
+                    onConfirmCoverUpdate = {
+                        val selected = coverUpdateSelection
+                        coverUpdateSelection = null
+                        if (selected != null) updateBookCovers(selected)
+                    },
+                    onDeleteOriginalChange = { deleteOriginal = it },
+                    onDismissDelete = { deleteDialogVisible = false },
+                    onConfirmDelete = ::confirmDeleteSelection,
+                    onCancelBatchChangeSource = {
+                        viewModel.batchChangeSourceCoroutine?.cancel()
+                    },
+                    onDismissExportSuccess = { exportedSourceUri = null },
+                    onCopyExportPath = {
+                        exportedSourceUri?.let(::sendToClip)
+                        exportedSourceUri = null
+                    },
+                )
+            }
+        }
+    }
+
+    private fun initGroupData() {
+        lifecycleScope.launch {
+            appDb.bookGroupDao.flowAll().catch {
+                AppLog.put("书架管理界面获取分组数据失败\n${it.localizedMessage}", it)
+            }.flowOn(IO).conflate().collect {
+                groupList.clear()
+                groupList.addAll(it)
+                topBarGroups = it.toList()
+            }
+        }
+    }
+
+    private fun upBookDataByGroupId() {
+        booksFlowJob?.cancel()
+        booksFlowJob = lifecycleScope.launch {
+            appDb.bookDao.flowByGroup(viewModel.groupId).map { list ->
+                val bookSort = AppConfig.getBookSortByGroupId(viewModel.groupId)
+                val sortedBooks = when (bookSort) {
+                    1 -> list.sortedByDescending { it.latestChapterTime }
+                    2 -> list.sortedWith { first, second ->
+                        first.name.cnCompare(second.name)
+                    }
+
+                    3 -> list.sortedBy { it.order }
+                    4 -> list.sortedByDescending {
+                        max(it.latestChapterTime, it.durChapterTime)
+                    }
+
+                    else -> list.sortedByDescending { it.durChapterTime }
+                }
+                sortedBooks to bookSort
+            }.catch {
+                AppLog.put("书架管理界面获取书籍列表失败\n${it.localizedMessage}", it)
+            }.flowOn(IO).conflate().collect {
+                books = it.first
+                isManualSort = it.second == 3
+                updateVisibleBooks()
+                viewModel.loadCacheFiles(it.first)
+            }
+        }
+    }
+
+    private fun updateVisibleBooks() {
+        val matching = if (topBarQuery.isEmpty()) {
+            books
+        } else {
+            books.filter { it.contains(topBarQuery) }
+        }
+        visibleBooks = matching.sortedForBookshelfManage(
+            sort = sortOrder,
+            readTime = Book::durChapterTime,
+            updateTime = Book::latestChapterTime,
+            compareNames = { first, second -> first.name.cnCompare(second.name) },
+            manualOrder = Book::order,
+            cacheBytes = { cachedBytes[it.bookUrl] },
+        )
+    }
+
+    private fun applyCacheStatistics(state: BookshelfCacheState) {
+        val sizes = state.books.mapValues { it.value.bytes }
+        val sizesChanged = cachedBytes != sizes
+        cachedChapterCounts = state.books.mapValues { it.value.status.cached }
+        cacheChapterTotals = state.books.mapValues { it.value.status.total }
+        clearableBookUrls = state.books.filterValues { it.status.hasCache }.keys
+        cachedBytes = sizes
+        val failed = state.failedBookUrls.isNotEmpty()
+        if (failed && !cacheReadError) toastOnUi(R.string.bookshelf_manage_cache_failed)
+        cacheReadError = failed
+        if (sizesChanged && sortOrder == BookshelfManageSort.CACHE_SIZE && !reordering) updateVisibleBooks()
+    }
+
+    private fun setBookSelected(book: Book, selected: Boolean) {
+        selectedBookUrls = if (selected) {
+            selectedBookUrls + book.bookUrl
+        } else {
+            selectedBookUrls - book.bookUrl
+        }
+    }
+
+    private fun selectAll() {
+        val visibleUrls = visibleBooks.mapTo(hashSetOf()) { it.bookUrl }
+        if (visibleUrls.isEmpty()) return
+        selectedBookUrls = if (visibleUrls.count(selectedBookUrls::contains) < visibleUrls.size) {
+            selectedBookUrls + visibleUrls
+        } else {
+            emptySet()
+        }
+    }
+
+    private fun invertSelection() {
+        var updated = selectedBookUrls
+        visibleBooks.forEach { book ->
+            updated = if (book.bookUrl in updated) {
+                updated - book.bookUrl
+            } else {
+                updated + book.bookUrl
+            }
+        }
+        selectedBookUrls = updated
+    }
+
+    private fun selectedBooks(): List<Book> {
+        return visibleBooks.filter { it.bookUrl in selectedBookUrls }
+    }
+
+    private fun onDockAction(action: BookshelfManageDockAction) {
+        val allSelected = selectedBooks()
+        val selected = allSelected.filter { action.isApplicable(it, it.bookUrl in clearableBookUrls) }
+        if (selected.isEmpty()) return
+        if (selected.size < allSelected.size) {
+            toastOnUi(getString(R.string.book_action_eligible_selection, selected.size, allSelected.size - selected.size))
+        }
+        when (action) {
+            BookshelfManageDockAction.CACHE -> selected.forEach { book ->
+                cacheBook(book, 0, book.lastChapterIndex)
+            }
+
+            BookshelfManageDockAction.UPDATE_COVER -> {
+                if (coverUpdateJob?.isActive == true) {
+                    toastOnUi(R.string.update_book_cover_running)
+                } else {
+                    coverUpdateSelection = selected
+                }
+            }
+            BookshelfManageDockAction.EXPORT_CONTENT -> showExportSettings(selected)
+            BookshelfManageDockAction.GROUP -> BookshelfBookGroupSheet(this, selected).show()
+            BookshelfManageDockAction.EXPORT_SOURCE -> exportBookSources(selected)
+            BookshelfManageDockAction.CHANGE_SOURCE -> {
+                pendingChangeSourceBooks = selected
+                showDialogFragment<SourcePickerDialog>()
+            }
+            BookshelfManageDockAction.ENABLE_UPDATE -> viewModel.upCanUpdate(selected, true)
+            BookshelfManageDockAction.DISABLE_UPDATE -> viewModel.upCanUpdate(selected, false)
+            BookshelfManageDockAction.REMOVE_GROUP -> clearSelectedBookGroups(selected)
+            BookshelfManageDockAction.CLEAR_CACHE -> viewModel.clearCache(selected)
+            BookshelfManageDockAction.DELETE -> requestDeleteSelection()
+        }
+    }
+
+    private fun requestDeleteSelection() {
+        deleteOriginal = LocalConfig.deleteBookOriginal
+        deleteDialogVisible = true
+    }
+
+    private fun confirmDeleteSelection() {
+        val selected = selectedBooks()
+        deleteDialogVisible = false
+        if (selected.isEmpty()) return
+        LocalConfig.deleteBookOriginal = deleteOriginal
+        viewModel.deleteBook(selected, deleteOriginal)
+    }
+
+    private fun clearSelectedBookGroups(books: List<Book>) {
+        viewModel.updateBook(*books.map { it.copy(group = 0L) }.toTypedArray())
+    }
+
+    private fun updateBookCovers(books: List<Book>) {
+        if (coverUpdateJob?.isActive == true) {
+            toastOnUi(R.string.update_book_cover_running)
+            return
+        }
+        val extractable = books.filter(::canExtractOriginalCover)
+        if (extractable.isEmpty()) {
+            toastOnUi(R.string.update_book_cover_no_local)
+            return
+        }
+        val ignored = books.size - extractable.size
+        toastOnUi(if (ignored > 0) {
+            getString(R.string.update_book_cover_start_ignored, extractable.size, ignored)
+        } else {
+            getString(R.string.update_book_cover_start, extractable.size)
+        })
+        coverUpdateJob = lifecycleScope.launch {
+            val result = withContext(IO) {
+                rebuildBookCovers(
+                    books = extractable,
+                    shouldExtract = ::canExtractOriginalCover,
+                    extract = { LocalBook.upCover(it, force = true) },
+                    onFailure = { book, error ->
+                        val reason = error?.localizedMessage ?: "书中无可提取封面或封面写入失败"
+                        AppLog.put("更新封面失败：${book.name}\n$reason", error)
+                    },
+                    onSuccess = { localBookCoverUpdates.notifyChanged(it.bookUrl) },
+                )
+            }
+            toastOnUi(getString(R.string.update_book_cover_done, result.success, result.failed))
+        }
+    }
+
+    private fun openBook(book: Book) {
+        startActivity<BookInfoActivity> {
+            putExtra("name", book.name)
+            putExtra("author", book.author)
+        }
+    }
+
+    private fun moveBook(fromIndex: Int, toIndex: Int) {
+        if (!sortOrder.allowsDragging || fromIndex !in visibleBooks.indices ||
+            toIndex !in visibleBooks.indices ||
+            fromIndex == toIndex
+        ) {
+            return
+        }
+        val reordered = visibleBooks.toMutableList()
+        val source = reordered[fromIndex]
+        val target = reordered[toIndex]
+        val sourceOrder = source.order
+        source.order = target.order
+        target.order = sourceOrder
+        reordered.add(toIndex, reordered.removeAt(fromIndex))
+        visibleBooks = reordered
+    }
+
+    private fun finishDrag() {
+        reordering = false
+        books.takeIf { it.isNotEmpty() }?.let {
+            viewModel.updateBook(*it.toTypedArray())
+        }
+    }
+
+    private fun prepareManualSort() {
+        if (!sortOrder.allowsDragging) return
+        reordering = true
+        val orderedBooks = if (sortOrder == BookshelfManageSort.MANUAL) books.sortedBy(Book::order) else books
+        orderedBooks.forEachIndexed { index, book ->
+            book.order = index + 1
+        }
+        if (!isManualSort) {
+            val currentGroup = groupList.firstOrNull { it.groupId == viewModel.groupId }
+            if (currentGroup != null && currentGroup.bookSort >= 0) {
+                currentGroup.bookSort = 3
+                appDb.bookGroupDao.update(currentGroup)
+            } else {
+                AppConfig.bookshelfSort = 3
+            }
+            isManualSort = true
+        }
+    }
+
+    private fun cacheBook(book: Book, start: Int, end: Int) {
+        if (!book.menuCapabilities.download) return
+        CacheBook.start(this, book, start, end)
+    }
+
+    private fun showExportSettings(books: List<Book>) {
+        pendingExportBooks = books
+        ExportSettingsDialog.show(supportFragmentManager, books.size)
+    }
+
+    override fun onExportSettingsConfirmed(result: ExportSettingsResult) {
+        val books = pendingExportBooks
+        if (books.isEmpty()) return
+        pendingExportSettings = result
+        val initialUri = ACache.get().getAsString(exportBookPathKey)
+            ?.takeIf { it.startsWith("content://") }
+            ?.let(android.net.Uri::parse)
+        exportContentDir.launch(SelectDirectoryContract.Request(initialUri = initialUri))
+    }
+
+    private fun startExportBooks(
+        books: List<Book>,
+        path: String,
+        settings: ExportSettingsResult,
+    ) {
+        val exportType = if (settings.exportType == 1) "epub" else "txt"
+        books.filter { it.menuCapabilities.export }.forEach { book ->
+            startService<ExportBookService> {
+                action = IntentAction.start
+                putExtra("bookUrl", book.bookUrl)
+                putExtra("exportType", exportType)
+                putExtra("exportPath", path)
+                putExtra("exportUseReplace", true)
+                putExtra("parallelExport", true)
+                putExtra("exportToWebDav", settings.exportToWebDav)
+                putExtra("includeChapterName", true)
+                putExtra("exportPlainText", settings.plainText)
+                putExtra("exportFilterInteractiveImages", settings.filterInteractiveImages)
+                putExtra("exportPictureFile", settings.exportPictures)
+            }
+        }
+        toastOnUi(R.string.export_wait)
+    }
+
+    private fun exportBookSources(books: List<Book>) {
+        BookSourceExportSheet(
+            context = this,
+            onShare = { shareBookSources(books) },
+            onSaveLocally = { saveBookSourcesLocally(books) },
+            onUpload = {
+                viewModel.saveBookSourcesToFile(books) { file, name ->
+                    showDialogFragment(BookSourceUploadDialog.create(file, name))
+                }
+            },
+        ).show()
+    }
+
+    private fun shareBookSources(books: List<Book>) {
+        viewModel.saveBookSourcesToFile(books) { file, _ ->
+            share(file)
+        }
+    }
+
+    private fun saveBookSourcesLocally(books: List<Book>) {
+        viewModel.saveBookSourcesToFile(books) { file, name ->
+            exportSourceFile.launch(CreateFileContract.FileData(name, file, "application/json"))
+        }
+    }
+
+    override fun sourceOnClick(source: BookSource) {
+        val selected = pendingChangeSourceBooks.filter { it.menuCapabilities.changeSource }
+        pendingChangeSourceBooks = emptyList()
+        if (selected.isNotEmpty()) viewModel.changeSource(selected, source)
+    }
+}
