@@ -1,0 +1,256 @@
+package io.legado.app.help.source
+
+import android.content.Intent
+import android.os.Build
+import androidx.annotation.RequiresApi
+import androidx.core.content.ContextCompat
+import io.legado.app.constant.SourceType
+import io.legado.app.data.appDb
+import io.legado.app.data.dao.deleteByKeysChunked
+import io.legado.app.data.entities.BaseSource
+import io.legado.app.data.entities.BookSource
+import io.legado.app.data.entities.BookSourcePart
+import io.legado.app.data.entities.RssSource
+import io.legado.app.help.http.BookSourceCookieStore
+import io.legado.app.help.config.SourceConfig
+import io.legado.app.help.coroutine.Coroutine
+import io.legado.app.model.AudioPlay
+import io.legado.app.model.ReadBook
+import io.legado.app.model.ReadManga
+import io.legado.app.model.VideoPlay
+import io.legado.app.service.VideoPlayService
+import io.legado.app.ui.video.VideoPlayerActivity
+import io.legado.app.utils.EncoderUtils
+import io.legado.app.utils.NetworkUtils
+import io.legado.app.utils.splitNotBlank
+import io.legado.app.utils.startActivity
+import io.legado.app.utils.toastOnUi
+import splitties.init.appCtx
+
+object SourceHelp {
+
+    private val list18Plus by lazy {
+        try {
+            return@lazy String(appCtx.assets.open("18PlusList.txt").readBytes())
+                .splitNotBlank("\n").map {
+                    EncoderUtils.base64Decode(it)
+                }.toHashSet()
+        } catch (_: Exception) {
+            return@lazy emptySet()
+        }
+    }
+
+    fun getSource(key: String?): BaseSource? {
+        key ?: return null
+        if (ReadBook.bookSource?.bookSourceUrl == key) {
+            return ReadBook.bookSource
+        } else if (AudioPlay.bookSource?.bookSourceUrl == key) {
+            return AudioPlay.bookSource
+        } else if (ReadManga.bookSource?.bookSourceUrl == key) {
+            return ReadManga.bookSource
+        } else if (VideoPlay.source?.getKey() == key) {
+            return VideoPlay.source
+        }
+        return appDb.bookSourceDao.getBookSource(key)
+            ?: appDb.rssSourceDao.getByKey(key)
+    }
+
+    fun getSource(key: String?, @SourceType.Type type: Int): BaseSource? {
+        key ?: return null
+        return when (type) {
+            SourceType.book -> appDb.bookSourceDao.getBookSource(key)
+            SourceType.rss -> appDb.rssSourceDao.getByKey(key)
+            else -> null
+        }
+    }
+
+    fun deleteSource(key: String, @SourceType.Type type: Int) {
+        when (type) {
+            SourceType.book -> deleteBookSource(key)
+            SourceType.rss -> deleteRssSource(key)
+        }
+    }
+
+    fun deleteBookSourceParts(sources: List<BookSourcePart>) {
+        deleteBookSourceKeys(sources.map { it.bookSourceUrl }.distinct())
+    }
+
+    fun deleteBookSources(sources: List<BookSource>) {
+        deleteBookSourceKeys(sources.map { it.bookSourceUrl }.distinct())
+    }
+
+    private fun deleteBookSourceKeys(sourceKeys: List<String>) {
+        if (sourceKeys.isEmpty()) return
+        appDb.runInTransaction {
+            appDb.bookSourceDao.deleteByKeysChunked(sourceKeys)
+            val cacheKeys = appDb.cacheDao.allKeys()
+            appDb.cacheDao.deleteSourceVariables(sourceKeys, cacheKeys)
+            BookSourceCookieStore.clear(sourceKeys)
+            BookSourceCacheStore.clear(sourceKeys, cacheKeys)
+            SourceConfig.removeSources(sourceKeys)
+        }
+    }
+
+    fun deleteBookSource(key: String) {
+        deleteBookSourceKeys(listOf(key))
+    }
+
+    fun deleteRssSources(sources: List<RssSource>) {
+        deleteRssSourceKeys(sources.map { it.sourceUrl }.distinct())
+    }
+
+    private fun deleteRssSourceKeys(sourceKeys: List<String>) {
+        if (sourceKeys.isEmpty()) return
+        appDb.runInTransaction {
+            sourceKeys.forEach { key ->
+                appDb.rssSourceDao.delete(key)
+                appDb.rssArticleDao.delete(key)
+            }
+            appDb.cacheDao.deleteSourceVariables(sourceKeys)
+        }
+    }
+
+    fun deleteRssSource(key: String) {
+        deleteRssSourceKeys(listOf(key))
+    }
+
+    fun enableSource(key: String, @SourceType.Type type: Int, enable: Boolean) {
+        when (type) {
+            SourceType.book -> appDb.bookSourceDao.enable(key, enable)
+            SourceType.rss -> appDb.rssSourceDao.enable(key, enable)
+        }
+    }
+
+    fun insertRssSource(vararg rssSources: RssSource) {
+        val rssSourcesGroup = rssSources.groupBy {
+            is18Plus(it.sourceUrl)
+        }
+        rssSourcesGroup[true]?.forEach {
+            appCtx.toastOnUi("${it.sourceName}是18+网址,禁止导入.")
+        }
+        rssSourcesGroup[false]?.let {
+            appDb.rssSourceDao.insert(*it.toTypedArray())
+        }
+    }
+
+    fun insertBookSource(vararg bookSources: BookSource) {
+        val bookSourcesGroup = bookSources.groupBy {
+            is18Plus(it.bookSourceUrl)
+        }
+        bookSourcesGroup[true]?.forEach {
+            appCtx.toastOnUi("${it.bookSourceName}是18+网址,禁止导入.")
+        }
+        bookSourcesGroup[false]?.let {
+            appDb.bookSourceDao.insert(*it.toTypedArray())
+        }
+        Coroutine.async {
+            adjustSortNumber()
+        }
+    }
+
+    /** 大合集按需读取并分批绑定参数，但仍是一次原子导入，排序也仅在成功后调整一次。 */
+    internal fun insertBookSourceBatches(batches: Sequence<List<BookSource>>) {
+        val check18Plus = list18Plus.isNotEmpty()
+        appDb.runInTransaction {
+            val allowed = if (check18Plus) arrayListOf<BookSource>() else null
+            for (batch in batches) {
+                if (!check18Plus) {
+                    appDb.bookSourceDao.insertAll(batch)
+                    continue
+                }
+                allowed!!.clear()
+                for (source in batch) {
+                    if (is18Plus(source.bookSourceUrl)) {
+                        appCtx.toastOnUi("${source.bookSourceName}是18+网址,禁止导入.")
+                    } else {
+                        allowed.add(source)
+                    }
+                }
+                if (allowed.isNotEmpty()) {
+                    appDb.bookSourceDao.insertAll(allowed)
+                }
+            }
+        }
+        Coroutine.async { adjustSortNumber() }
+    }
+
+    private fun is18Plus(url: String?): Boolean {
+        if (list18Plus.isEmpty() || url.isNullOrEmpty()) {
+            return false
+        }
+        val baseUrl = NetworkUtils.getBaseUrl(url) ?: return false
+        val start = baseUrl.indexOf("://").let { if (it >= 0) it + 3 else 0 }
+        val lastDot = baseUrl.lastIndexOf('.')
+        if (lastDot <= start) return false
+        val prevDot = baseUrl.lastIndexOf('.', lastDot - 1)
+        val domainStart = if (prevDot >= start) prevDot + 1 else start
+        if (domainStart >= lastDot) return false
+        val host = baseUrl.substring(domainStart)
+        return list18Plus.contains(host)
+    }
+
+    /**
+     * 调整排序序号
+     */
+    fun adjustSortNumber() {
+        if (
+            appDb.bookSourceDao.maxOrder > 99999
+            || appDb.bookSourceDao.minOrder < -99999
+            || appDb.bookSourceDao.hasDuplicateOrder
+        ) {
+            val sources = appDb.bookSourceDao.allPart
+            var updated = false
+            appDb.runInTransaction {
+                val stmt = appDb.openHelper.writableDatabase.compileStatement(
+                    "UPDATE book_sources SET customOrder = ? WHERE bookSourceUrl = ?"
+                )
+                try {
+                    sources.forEachIndexed { index, bookSource ->
+                        if (bookSource.customOrder != index) {
+                            stmt.clearBindings()
+                            stmt.bindLong(1, index.toLong())
+                            stmt.bindString(2, bookSource.bookSourceUrl)
+                            stmt.executeUpdateDelete()
+                            bookSource.customOrder = index
+                            updated = true
+                        }
+                    }
+                } finally {
+                    stmt.close()
+                }
+            }
+            if (updated) {
+                appDb.invalidationTracker.refreshVersionsAsync()
+            }
+        }
+    }
+
+    fun openVideoPlayer(source: BaseSource?, url: String, title: String, isFloat: Boolean) {
+        if (isFloat) {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M &&
+                !android.provider.Settings.canDrawOverlays(appCtx)) {
+                io.legado.app.lib.permission.PermissionsCompat.Builder()
+                    .addPermissions(io.legado.app.lib.permission.Permissions.SYSTEM_ALERT_WINDOW)
+                    .rationale(io.legado.app.R.string.float_permission_rationale)
+                    .onGranted { openVideoPlayer(source, url, title, true) }
+                    .request()
+                return
+            }
+            val intent = Intent(appCtx, VideoPlayService::class.java).apply {
+                putExtra("videoUrl", url)
+                putExtra("videoTitle", title)
+                putExtra("sourceKey", source?.getKey())
+                putExtra("sourceType", source?.getSourceType())
+            }
+            ContextCompat.startForegroundService(appCtx, intent)
+        } else {
+            appCtx.startActivity<VideoPlayerActivity> {
+                putExtra("videoUrl", url)
+                putExtra("videoTitle", title)
+                putExtra("sourceKey", source?.getKey())
+                putExtra("sourceType", source?.getSourceType())
+            }
+        }
+    }
+
+}

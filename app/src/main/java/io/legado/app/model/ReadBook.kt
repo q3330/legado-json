@@ -1,0 +1,1464 @@
+package io.legado.app.model
+
+import io.legado.app.constant.AppLog
+import io.legado.app.constant.EventBus
+import io.legado.app.constant.PageAnim.scrollPageAnim
+import io.legado.app.data.appDb
+import io.legado.app.data.entities.Book
+import io.legado.app.data.entities.BookChapter
+import io.legado.app.data.entities.BookProgress
+import io.legado.app.data.entities.BookSource
+import io.legado.app.data.entities.Bookmark
+import io.legado.app.help.AppWebDav
+import io.legado.app.help.book.BookHelp
+import io.legado.app.help.book.ContentProcessor
+import io.legado.app.help.book.isEpub
+import io.legado.app.help.book.isImage
+import io.legado.app.help.book.isLocal
+import io.legado.app.help.book.isPdf
+import io.legado.app.help.book.isSameNameAuthor
+import io.legado.app.help.book.readSimulating
+import io.legado.app.help.book.simulatedTotalChapterNum
+import io.legado.app.help.book.update
+import io.legado.app.help.config.AppConfig
+import io.legado.app.help.config.ReadBookConfig
+import io.legado.app.help.coroutine.Coroutine
+import io.legado.app.help.globalExecutor
+import io.legado.app.model.localBook.TextFile
+import io.legado.app.model.webBook.WebBook
+import io.legado.app.service.BaseReadAloudService
+import io.legado.app.service.CacheBookService
+import io.legado.app.ui.book.read.page.entities.TextChapter
+import io.legado.app.ui.book.read.page.provider.ChapterProvider
+import io.legado.app.ui.book.read.page.provider.LayoutProgressListener
+import io.legado.app.ui.book.read.page.provider.NativeTextHighlightResolver
+import io.legado.app.utils.postEvent
+import io.legado.app.utils.stackTraceStr
+import io.legado.app.utils.toastOnUi
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers.IO
+import kotlinx.coroutines.Dispatchers.Main
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import splitties.init.appCtx
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.max
+import kotlin.math.min
+
+
+@Suppress("MemberVisibilityCanBePrivate")
+object ReadBook : CoroutineScope by MainScope() {
+    var book: Book? = null
+    var callBack: CallBack? = null
+    var inBookshelf = false
+    var chapterSize = 0
+    var simulatedChapterSize = 0
+    var durChapterIndex = 0
+    var durChapterPos = 0
+    var isLocalBook = true
+    var chapterChanged = false
+    var prevTextChapter: TextChapter? = null
+    var curTextChapter: TextChapter? = null
+    var nextTextChapter: TextChapter? = null
+    var bookSource: BookSource? = null
+    var msg: String? = null
+    private val loadingChapters = arrayListOf<Int>()
+    private val loadEpoch = ReadBookLoadEpoch()
+    @Volatile
+    private var tocOrderPausedBookUrl: String? = null
+    private var advanceAfterTocReorder: (() -> Unit)? = null
+    private val progressNavigationVersion = AtomicLong()
+    private val chapterLoadingJobs = ConcurrentHashMap<Int, Coroutine<*>>()
+    private val chapterLoadCompletions = ChapterLoadCompletions()
+    private val prevChapterLoadingLock = Mutex()
+    private val curChapterLoadingLock = Mutex()
+    private val nextChapterLoadingLock = Mutex()
+    @Volatile
+    private var pendingBookmarkNavigation: PendingBookmarkNavigation? = null
+
+    private data class PendingBookmarkNavigation(
+        val bookUrl: String,
+        val generation: Long,
+        val owner: CallBack?,
+        val bookmark: Bookmark,
+    )
+
+    /* 跳转进度前进度记录 */
+    var lastBookProgress: BookProgress? = null
+
+    /* web端阅读进度记录 */
+    var webBookProgress: BookProgress? = null
+
+    var preDownloadTask: Job? = null
+    val downloadedChapters = hashSetOf<Int>()
+    val downloadFailChapters = hashMapOf<Int, Int>()
+    var contentProcessor: ContentProcessor? = null
+    val downloadScope = CoroutineScope(SupervisorJob() + IO)
+    val preDownloadSemaphore = Semaphore(2)
+    val executor = globalExecutor
+
+    @Synchronized
+    fun resetData(book: Book) {
+        releaseAndCancel()
+        ReadBook.book = book
+        chapterSize = appDb.bookChapterDao.getChapterCount(book.bookUrl)
+        simulatedChapterSize = if (book.readSimulating()) {
+            book.simulatedTotalChapterNum()
+        } else {
+            chapterSize
+        }
+        contentProcessor = ContentProcessor.get(book).apply {
+            upReplaceRules()
+        }
+        durChapterIndex = book.durChapterIndex
+        durChapterPos = book.durChapterPos
+        isLocalBook = book.isLocal
+        clearTextChapter()
+        callBack?.upContent()
+        callBack?.upMenuView()
+        callBack?.upPageAnim()
+        upWebBook(book)
+        lastBookProgress = null
+        webBookProgress = null
+        TextFile.clear()
+        synchronized(this) {
+            loadingChapters.clear()
+            downloadedChapters.clear()
+            downloadFailChapters.clear()
+        }
+    }
+
+    @Synchronized
+    fun upData(book: Book) {
+        releaseAndCancel()
+        ReadBook.book = book
+        chapterSize = appDb.bookChapterDao.getChapterCount(book.bookUrl)
+        simulatedChapterSize = if (book.readSimulating()) {
+            book.simulatedTotalChapterNum()
+        } else {
+            chapterSize
+        }
+        if (durChapterIndex != book.durChapterIndex) {
+            durChapterIndex = book.durChapterIndex
+            durChapterPos = book.durChapterPos
+            clearTextChapter()
+        }
+        if (curTextChapter?.isCompleted == false) {
+            curTextChapter = null
+        }
+        if (nextTextChapter?.isCompleted == false) {
+            nextTextChapter = null
+        }
+        if (prevTextChapter?.isCompleted == false) {
+            prevTextChapter = null
+        }
+        contentProcessor = ContentProcessor.get(book).apply {
+            upReplaceRules()
+        }
+        callBack?.upMenuView()
+        upWebBook(book)
+        synchronized(this) {
+            loadingChapters.clear()
+            downloadedChapters.clear()
+            downloadFailChapters.clear()
+        }
+    }
+
+    fun upWebBook(book: Book) {
+        if (book.isLocal) {
+            bookSource = null
+            if (book.getImageStyle().isNullOrBlank() && (book.isImage || book.isPdf)) {
+                book.setImageStyle(Book.imgStyleFull)
+            }
+        } else {
+            appDb.bookSourceDao.getBookSource(book.origin)?.let {
+                bookSource = it
+                if (book.getImageStyle().isNullOrBlank()) {
+                    var imageStyle = it.getContentRule().imageStyle
+                    if (imageStyle.isNullOrBlank() && (book.isImage || book.isPdf)) {
+                        imageStyle = Book.imgStyleFull
+                    }
+                    book.setImageStyle(imageStyle)
+                    if (imageStyle.equals(Book.imgStyleSingle, true)) {
+                        book.setPageAnim(0)
+                    }
+                }
+            } ?: let {
+                bookSource = null
+            }
+        }
+    }
+
+    fun upReadBookConfig(book: Book) {
+        val oldIndex = ReadBookConfig.styleSelect
+        val bookStyleChanged = ReadBookConfig.bindBook(book)
+        ReadBookConfig.isComic = book.isImage
+        if (oldIndex != ReadBookConfig.styleSelect || bookStyleChanged) {
+            postEvent(EventBus.UP_CONFIG, arrayListOf(1, 2, 5))
+            postEvent(EventBus.UPDATE_READ_ACTION_BAR, true)
+        }
+    }
+
+    fun setProgress(progress: BookProgress) {
+        if (tocOrderPausedBookUrl != null && tocOrderPausedBookUrl == book?.bookUrl) return
+        progressNavigationVersion.incrementAndGet()
+        chapterLoadCompletions.cancelAll()
+        pendingBookmarkNavigation = null
+        if (progress.durChapterIndex < chapterSize &&
+            (durChapterIndex != progress.durChapterIndex
+                    || durChapterPos != progress.durChapterPos)
+        ) {
+            durChapterIndex = progress.durChapterIndex
+            durChapterPos = progress.durChapterPos
+            saveRead()
+            clearTextChapter()
+            callBack?.upContent()
+            loadContent(resetPageOffset = true)
+        }
+    }
+
+    //暂时保存跳转前进度
+    fun saveCurrentBookProgress() {
+        if (lastBookProgress != null) return //避免进度条连续跳转不能覆盖最初的进度记录
+        lastBookProgress = book?.let { BookProgress(it) }
+    }
+
+    //恢复跳转前进度
+    fun restoreLastBookProgress() {
+        pendingBookmarkNavigation = null
+        lastBookProgress?.let {
+            setProgress(it)
+            lastBookProgress = null
+        }
+    }
+
+    fun clearTextChapter() {
+        chapterLoadCompletions.cancelAll()
+        pendingBookmarkNavigation = null
+        clearExpiredChapterLoadingJob(true)
+        prevTextChapter = null
+        curTextChapter = null
+        nextTextChapter = null
+    }
+
+    /** 从外部 scope 在 Main 调用；暂停本书请求，不停止共享缓存队列。 */
+    internal suspend fun pauseForTocReorder(bookUrl: String): Boolean {
+        val jobs = synchronized(this) {
+            if (book?.bookUrl != bookUrl) return false
+            tocOrderPausedBookUrl = bookUrl
+            advanceAfterTocReorder = null
+            loadEpoch.invalidate()
+            pendingBookmarkNavigation = null
+            preDownloadTask?.cancel()
+            preDownloadTask = null
+            val pending = (coroutineContext[Job]?.children?.toList().orEmpty() +
+                downloadScope.coroutineContext[Job]?.children?.toList().orEmpty()).distinct()
+            pending.forEach { it.cancel() }
+            clearTextChapter()
+            loadingChapters.clear()
+            downloadedChapters.clear()
+            downloadFailChapters.clear()
+            pending
+        }
+        jobs.joinAll()
+        val progressBarrier = CompletableDeferred<Unit>()
+        executor.execute { progressBarrier.complete(Unit) }
+        progressBarrier.await()
+        return true
+    }
+
+    /** 成功传新目录的 Book，失败传原 Book；同一章节的页内位置由调用方保留。 */
+    @Synchronized
+    internal fun resumeAfterTocReorder(updatedBook: Book) {
+        if (tocOrderPausedBookUrl != updatedBook.bookUrl) return
+        val advance = advanceAfterTocReorder
+        advanceAfterTocReorder = null
+        tocOrderPausedBookUrl = null
+        if (book?.bookUrl != updatedBook.bookUrl) return
+        loadEpoch.invalidate()
+        book = updatedBook
+        chapterSize = updatedBook.totalChapterNum
+        simulatedChapterSize = updatedBook.simulatedTotalChapterNum()
+        durChapterIndex = updatedBook.durChapterIndex
+        durChapterPos = updatedBook.durChapterPos
+        isLocalBook = updatedBook.isLocal
+        clearTextChapter()
+        callBack?.upMenuView()
+        if (advance != null && BaseReadAloudService.isRun) {
+            advance()
+        } else if (callBack != null || BaseReadAloudService.isRun) {
+            loadContent(resetPageOffset = false)
+        }
+    }
+
+    fun reloadContentForReplaceRuleChanged(resetPageOffset: Boolean = false) {
+        clearExpiredChapterLoadingJob(true)
+        prevTextChapter?.cancelLayout()
+        curTextChapter?.cancelLayout()
+        nextTextChapter?.cancelLayout()
+        prevTextChapter = null
+        curTextChapter = null
+        nextTextChapter = null
+        synchronized(this) {
+            loadingChapters.removeAll {
+                it in durChapterIndex - 1..durChapterIndex + 1
+            }
+        }
+        callBack?.upContent()
+        loadContent(resetPageOffset = resetPageOffset)
+    }
+
+    suspend fun reloadContentForReplaceRuleChangedAwait(resetPageOffset: Boolean = false) {
+        clearExpiredChapterLoadingJob(true)
+        prevTextChapter?.cancelLayout()
+        curTextChapter?.cancelLayout()
+        nextTextChapter?.cancelLayout()
+        prevTextChapter = null
+        curTextChapter = null
+        nextTextChapter = null
+        synchronized(this) {
+            loadingChapters.removeAll {
+                it in durChapterIndex - 1..durChapterIndex + 1
+            }
+        }
+        callBack?.upContentAwait()
+        loadContentAwait(durChapterIndex, resetPageOffset = resetPageOffset)
+        loadContent(durChapterIndex + 1, resetPageOffset = resetPageOffset)
+        loadContent(durChapterIndex - 1, resetPageOffset = resetPageOffset)
+    }
+
+    fun clearSearchResult() {
+        curTextChapter?.clearSearchResult()
+        prevTextChapter?.clearSearchResult()
+        nextTextChapter?.clearSearchResult()
+    }
+
+    fun uploadProgress(toast: Boolean = false, successAction: (() -> Unit)? = null) {
+        book?.let {
+            launch(IO) {
+                AppWebDav.uploadBookProgress(it, toast) {
+                    successAction?.invoke()
+                }
+                ensureActive()
+                it.update()
+            }
+        }
+    }
+
+    /** Entry sync and its confirmation must not outlive a book session or explicit navigation. */
+    internal data class ProgressSyncToken(
+        val book: Book,
+        val loadGeneration: Long,
+        val navigationVersion: Long,
+    )
+
+    internal fun captureProgressSync(targetBook: Book): ProgressSyncToken? {
+        if (book !== targetBook) return null
+        return ProgressSyncToken(targetBook, loadEpoch.current, progressNavigationVersion.get())
+    }
+
+    internal fun isProgressSyncCurrent(token: ProgressSyncToken): Boolean =
+        book === token.book && loadEpoch.isCurrent(token.loadGeneration) &&
+                progressNavigationVersion.get() == token.navigationVersion
+
+    /**
+     * 同步阅读进度
+     * 如果当前进度快于服务器进度或者没有进度进行上传，如果慢与服务器进度则执行传入动作
+     */
+    fun syncProgress(
+        newProgressAction: ((progress: BookProgress) -> Unit)? = null,
+        uploadSuccessAction: (() -> Unit)? = null,
+        syncSuccessAction: (() -> Unit)? = null
+    ) {
+        if (!AppConfig.syncBookProgress) return
+        val book = book ?: return
+        val syncToken = captureProgressSync(book) ?: return
+        Coroutine.async {
+            AppWebDav.getBookProgress(book)
+        }.onError {
+            AppLog.put("拉取阅读进度失败", it)
+        }.onSuccess { progress ->
+            if (!AppConfig.syncBookProgress) return@onSuccess
+            // Exit sync only uploads the captured book and must survive reader teardown.
+            if (newProgressAction != null && !isProgressSyncCurrent(syncToken)) return@onSuccess
+            if (progress == null || progress.durChapterIndex < book.durChapterIndex ||
+                (progress.durChapterIndex == book.durChapterIndex
+                        && progress.durChapterPos < book.durChapterPos)
+            ) {
+                // 服务器没有进度或者进度比服务器快，上传现有进度
+                Coroutine.async {
+                    AppWebDav.uploadBookProgress(BookProgress(book), uploadSuccessAction)
+                    book.update()
+                }
+            } else if (progress.durChapterIndex > book.durChapterIndex ||
+                progress.durChapterPos > book.durChapterPos
+            ) {
+                // 进度比服务器慢，执行传入动作
+                newProgressAction?.invoke(progress)
+            } else {
+                syncSuccessAction?.invoke()
+            }
+        }
+    }
+
+    fun upReadTime() = Unit
+
+    fun upMsg(msg: String?) {
+        if (ReadBook.msg != msg) {
+            ReadBook.msg = msg
+            callBack?.upContent()
+        }
+    }
+
+    @Synchronized
+    fun moveToNextPage(): Boolean {
+        if (tocOrderPausedBookUrl != null && tocOrderPausedBookUrl == book?.bookUrl) return false
+        pendingBookmarkNavigation = null
+        var hasNextPage = false
+        curTextChapter?.let {
+            val nextPagePos = it.getNextPageLength(durChapterPos)
+            if (nextPagePos >= 0) {
+                hasNextPage = true
+                it.getPage(durPageIndex)?.removePageAloudSpan()
+                durChapterPos = nextPagePos
+                callBack?.cancelSelect()
+                callBack?.upContent()
+                saveRead(true)
+            }
+        }
+        return hasNextPage
+    }
+
+    @Synchronized
+    fun moveToPrevPage(): Boolean {
+        if (tocOrderPausedBookUrl != null && tocOrderPausedBookUrl == book?.bookUrl) return false
+        pendingBookmarkNavigation = null
+        var hasPrevPage = false
+        curTextChapter?.let {
+            val prevPagePos = it.getPrevPageLength(durChapterPos)
+            if (prevPagePos >= 0) {
+                hasPrevPage = true
+                durChapterPos = prevPagePos
+                callBack?.upContent()
+                saveRead(true)
+            }
+        }
+        return hasPrevPage
+    }
+
+    @Synchronized
+    fun moveToNextChapter(
+        upContent: Boolean,
+        upContentInPlace: Boolean = true,
+        restartReadAloud: Boolean = true,
+        startPosition: Int = 0,
+    ): Boolean {
+        if (tocOrderPausedBookUrl != null && tocOrderPausedBookUrl == book?.bookUrl) {
+            if (BaseReadAloudService.isRun) {
+                advanceAfterTocReorder = {
+                    if (!moveToNextChapter(upContent, upContentInPlace, true, startPosition)) {
+                        ReadAloud.stop(appCtx)
+                    }
+                }
+                // 普通朗读不要因延后续章而停止服务；无缝预加载不能继续提交旧目录的计划。
+                return restartReadAloud
+            }
+            return false
+        }
+        pendingBookmarkNavigation = null
+        if (durChapterIndex < simulatedChapterSize - 1) {
+            durChapterPos = startPosition
+            durChapterIndex++
+            clearExpiredChapterLoadingJob()
+            prevTextChapter = curTextChapter
+            curTextChapter = nextTextChapter
+            nextTextChapter = null
+            if (curTextChapter == null) {
+                AppLog.putDebug("moveToNextChapter-章节未加载,开始加载")
+                if (upContentInPlace) callBack?.upContent()
+                loadContent(durChapterIndex, upContent, resetPageOffset = false)
+            } else if (upContent && upContentInPlace) {
+                AppLog.putDebug("moveToNextChapter-章节已加载,刷新视图")
+                callBack?.upContent()
+            }
+            loadContent(durChapterIndex.plus(1), upContent, false)
+            saveRead()
+            callBack?.upMenuView()
+            AppLog.putDebug("moveToNextChapter-curPageChanged()")
+            curPageChanged(restartReadAloud = restartReadAloud)
+            return true
+        } else {
+            AppLog.putDebug("跳转下一章失败,没有下一章")
+            return false
+        }
+    }
+
+    suspend fun moveToNextChapterAwait(
+        upContent: Boolean,
+        upContentInPlace: Boolean = true
+    ): Boolean {
+        val (requestBook, generation) = currentLoad() ?: return false
+        pendingBookmarkNavigation = null
+        if (durChapterIndex < simulatedChapterSize - 1) {
+            synchronized(this) {
+                if (!isLoadCurrent(requestBook.bookUrl, generation)) return false
+                durChapterPos = 0
+                durChapterIndex++
+                clearExpiredChapterLoadingJob()
+                prevTextChapter = curTextChapter
+                curTextChapter = nextTextChapter
+                nextTextChapter = null
+            }
+            if (curTextChapter == null) {
+                AppLog.putDebug("moveToNextChapter-章节未加载,开始加载")
+                if (upContentInPlace) callBack?.upContentAwait()
+                if (!isLoadCurrent(requestBook.bookUrl, generation)) return false
+                loadContentAwait(durChapterIndex, upContent, resetPageOffset = false)
+            } else if (upContent && upContentInPlace) {
+                AppLog.putDebug("moveToNextChapter-章节已加载,刷新视图")
+                callBack?.upContentAwait()
+            }
+            if (!isLoadCurrent(requestBook.bookUrl, generation)) return false
+            loadContent(durChapterIndex.plus(1), upContent, false)
+            saveRead()
+            callBack?.upMenuView()
+            AppLog.putDebug("moveToNextChapter-curPageChanged()")
+            curPageChanged()
+            return true
+        } else {
+            AppLog.putDebug("跳转下一章失败,没有下一章")
+            return false
+        }
+    }
+
+    @Synchronized
+    fun moveToPrevChapter(
+        upContent: Boolean,
+        toLast: Boolean = true,
+        upContentInPlace: Boolean = true,
+        restartReadAloud: Boolean = true,
+        startPosition: Int? = null,
+    ): Boolean {
+        if (tocOrderPausedBookUrl != null && tocOrderPausedBookUrl == book?.bookUrl) return false
+        pendingBookmarkNavigation = null
+        if (durChapterIndex > 0) {
+            durChapterPos = startPosition ?: if (toLast) prevTextChapter?.lastReadLength ?: Int.MAX_VALUE else 0
+            durChapterIndex--
+            clearExpiredChapterLoadingJob()
+            nextTextChapter = curTextChapter
+            curTextChapter = prevTextChapter
+            prevTextChapter = null
+            if (curTextChapter == null) {
+                if (upContentInPlace) callBack?.upContent()
+                loadContent(durChapterIndex, upContent, resetPageOffset = false)
+            } else if (upContent && upContentInPlace) {
+                callBack?.upContent()
+            }
+            loadContent(durChapterIndex.minus(1), upContent, false)
+            saveRead()
+            callBack?.upMenuView()
+            curPageChanged(restartReadAloud = restartReadAloud)
+            return true
+        } else {
+            return false
+        }
+    }
+
+    @Synchronized
+    fun skipToPage(index: Int, success: (() -> Unit)? = null) {
+        if (tocOrderPausedBookUrl != null && tocOrderPausedBookUrl == book?.bookUrl) return
+        progressNavigationVersion.incrementAndGet()
+        chapterLoadCompletions.cancelAll()
+        pendingBookmarkNavigation = null
+        durChapterPos = curTextChapter?.getReadLength(index) ?: index
+        callBack?.upContent {
+            success?.invoke()
+        }
+        curPageChanged()
+        saveRead(true)
+    }
+
+    fun setPageIndex(index: Int) {
+        recycleRecorders(durPageIndex, index)
+        commitContentPosition(curTextChapter?.getReadLength(index) ?: index)
+    }
+
+    /** A layout supplies a content offset; persistence and playback policy stay here. */
+    @Synchronized
+    internal fun commitContentPosition(position: Int) {
+        if (tocOrderPausedBookUrl != null && tocOrderPausedBookUrl == book?.bookUrl) return
+        if (position != durChapterPos) pendingBookmarkNavigation = null
+        durChapterPos = position
+        saveRead(true)
+        curPageChanged(true)
+    }
+
+    fun recycleRecorders(beforeIndex: Int, afterIndex: Int) {
+        if (!AppConfig.optimizeRender) {
+            return
+        }
+        executor.execute {
+            val textChapter = curTextChapter ?: return@execute
+            if (afterIndex > beforeIndex) {
+                textChapter.getPage(afterIndex - 2)?.recycleRecorders()
+            }
+            if (afterIndex < beforeIndex) {
+                textChapter.getPage(afterIndex + 3)?.recycleRecorders()
+            }
+        }
+    }
+
+    fun openChapter(
+        index: Int,
+        durChapterPos: Int = 0,
+        upContent: Boolean = true,
+        success: (() -> Unit)? = null
+    ) = openChapter(index, durChapterPos, upContent, success, null)
+
+    /** Highlight offsets are resolved against the target chapter as its pages become available. */
+    fun openBookmark(bookmark: Bookmark, success: (() -> Unit)? = null) {
+        val currentBook = book ?: return
+        if (bookmark.bookName != currentBook.name || bookmark.bookAuthor != currentBook.author ||
+            bookmark.chapterIndex !in 0 until chapterSize
+        ) return
+        if (!bookmark.isTextHighlight) {
+            openChapter(bookmark.chapterIndex, bookmark.chapterPos, success = success)
+            return
+        }
+        openChapter(bookmark.chapterIndex, 0, true, success, bookmark.copy())
+    }
+
+    @Synchronized
+    private fun openChapter(
+        index: Int,
+        durChapterPos: Int,
+        upContent: Boolean,
+        success: (() -> Unit)?,
+        bookmark: Bookmark?,
+        onOpened: (() -> Unit)? = null,
+    ) {
+        if (tocOrderPausedBookUrl != null && tocOrderPausedBookUrl == book?.bookUrl) return
+        if (index < chapterSize) {
+            // 即使跳到相同位置，也不能再应用跳转前发出的同步结果。
+            progressNavigationVersion.incrementAndGet()
+            chapterLoadCompletions.cancelAll()
+            clearTextChapter()
+            if (upContent) callBack?.upContent()
+            durChapterIndex = index
+            ReadBook.durChapterPos = durChapterPos
+            pendingBookmarkNavigation = bookmark?.let { target ->
+                book?.let { PendingBookmarkNavigation(it.bookUrl, loadEpoch.current, callBack, target) }
+            }
+            saveRead()
+            onOpened?.invoke()
+            loadContent(resetPageOffset = true) {
+                success?.invoke()
+            }
+        }
+    }
+
+    /** Wait for the existing loader, including pre-downloads that already own this chapter. */
+    internal suspend fun openChapterForReadAloud(index: Int) {
+        lateinit var request: ProgressSyncToken
+        var registration: Pair<ChapterLoadCompletions.Key, CompletableDeferred<Unit>>? = null
+        try {
+            synchronized(this) {
+                val targetBook = book ?: error("当前书籍为空")
+                if (index !in 0 until chapterSize || tocOrderPausedBookUrl == targetBook.bookUrl) {
+                    throw CancellationException("Reader changed")
+                }
+                openChapter(index, 0, false, null, null, onOpened = {
+                    request = checkNotNull(captureProgressSync(targetBook))
+                    val key = ChapterLoadCompletions.Key(targetBook.bookUrl, request.loadGeneration, index)
+                    registration = key to chapterLoadCompletions.register(key)
+                })
+            }
+            val (_, completion) = checkNotNull(registration)
+            completion.await()
+            if (!isProgressSyncCurrent(request) || durChapterIndex != index) {
+                throw CancellationException("Reader changed")
+            }
+            ensureLoadCurrent(request.book, request.loadGeneration)
+        } finally {
+            registration?.let { (key, completion) -> chapterLoadCompletions.unregister(key, completion) }
+        }
+    }
+
+    @Synchronized
+    private fun completeChapterLoad(book: Book, generation: Long, index: Int, failure: Throwable? = null) {
+        if (!isLoadCurrent(book.bookUrl, generation)) return
+        val result = failure ?: when {
+            index != durChapterIndex -> CancellationException("Reader changed")
+            curTextChapter?.let { it.isCompleted && it.chapter.index == index } != true ->
+                IllegalStateException("章节内容未加载")
+            (downloadFailChapters[index] ?: 0) > 0 -> IllegalStateException("获取正文失败")
+            else -> null
+        }
+        chapterLoadCompletions.complete(ChapterLoadCompletions.Key(book.bookUrl, generation, index), result)
+    }
+
+    /** False means a requested highlight still has no visible range in the published layout. */
+    private fun applyPendingBookmarkNavigation(chapter: TextChapter, completed: Boolean = false): Boolean {
+        val pending = pendingBookmarkNavigation ?: return true
+        if (!isLoadCurrent(pending.bookUrl, pending.generation) || callBack !== pending.owner ||
+            durChapterIndex != pending.bookmark.chapterIndex
+        ) {
+            if (pendingBookmarkNavigation === pending) pendingBookmarkNavigation = null
+            return true
+        }
+        // A cancelled older load may finish dispatching a page after a new request was installed.
+        if (curTextChapter !== chapter || chapter.position != pending.bookmark.chapterIndex) return true
+        // Legacy quote verification and its display-offset fallback need the complete chapter.
+        if (pending.bookmark.bookmarkType == Bookmark.TYPE_TEXT_HIGHLIGHT && !completed) return false
+        val range = NativeTextHighlightResolver.resolve(pending.bookmark, chapter.position, chapter.highlightPositionMap)
+        if (range == null && !completed) return false
+        synchronized(this) {
+            if (pendingBookmarkNavigation !== pending ||
+                !isLoadCurrent(pending.bookUrl, pending.generation) || curTextChapter !== chapter ||
+                callBack !== pending.owner || durChapterIndex != pending.bookmark.chapterIndex
+            ) return true
+            pendingBookmarkNavigation = null
+            if (range != null) {
+                durChapterPos = range.start
+                saveRead()
+            }
+        }
+        return true
+    }
+
+    /**
+     * 当前页面变化
+     */
+    private fun curPageChanged(
+        pageChanged: Boolean = false,
+        restartReadAloud: Boolean = true
+    ) {
+        callBack?.pageChanged(pageChanged)
+        curTextChapter?.let {
+            // 滚动产生的页位置变化只更新阅读视图，不暂停或重定位朗读。
+            if (restartReadAloud && !(pageAnim() == 3 && pageChanged)
+                && BaseReadAloudService.isRun && it.isCompleted
+            ) {
+                val continuePlaying = BaseReadAloudService.isPlay()
+                readAloud(continuePlaying)
+            }
+        }
+        upReadTime()
+        preDownload()
+    }
+
+    /**
+     * 朗读
+     * @param engineVerified 透传给 [ReadAloud.play]，普通入口必须保持 false。
+     */
+    fun readAloud(
+        play: Boolean = true,
+        startPos: Int = 0,
+        engineVerified: Boolean = false,
+    ) {
+        book ?: return
+        val textChapter = curTextChapter ?: return
+        if (textChapter.isCompleted) {
+            ReadAloud.play(
+                context = appCtx,
+                play = play,
+                startPos = startPos,
+                engineVerified = engineVerified,
+                // EPUB's visible page can start inside a native page. Preserve
+                // the committed content offset when the existing policy restarts speech.
+                contentPosition = if (book?.isEpub == true && startPos == 0) durChapterPos else null,
+            )
+        }
+    }
+
+    /**
+     * 当前页数
+     */
+    val durPageIndex: Int
+        get() {
+            return curTextChapter?.getPageIndexByCharIndex(durChapterPos) ?: durChapterPos
+        }
+
+    /**
+     * 是否排版到了当前阅读位置
+     */
+    val isLayoutAvailable inline get() = durPageIndex >= 0
+
+    val isScroll inline get() = pageAnim() == scrollPageAnim
+
+    val contentLoadFinish get() = curTextChapter != null || msg != null
+
+    /**
+     * chapterOnDur: 0为当前页,1为下一页,-1为上一页
+     */
+    fun textChapter(chapterOnDur: Int = 0): TextChapter? {
+        return when (chapterOnDur) {
+            0 -> curTextChapter
+            1 -> nextTextChapter
+            -1 -> prevTextChapter
+            else -> null
+        }
+    }
+
+    /**
+     * 加载当前章节和前后一章内容
+     * @param resetPageOffset 滚动阅读是否重置滚动位置
+     * @param success 当前章节加载完成回调
+     */
+    fun loadContent(
+        resetPageOffset: Boolean,
+        success: (() -> Unit)? = null
+    ) {
+        loadContent(durChapterIndex, resetPageOffset = resetPageOffset) {
+            success?.invoke()
+        }
+        loadContent(durChapterIndex + 1, resetPageOffset = resetPageOffset)
+        loadContent(durChapterIndex - 1, resetPageOffset = resetPageOffset)
+    }
+
+    fun loadOrUpContent(success: (() -> Unit)? = null) {
+        if (curTextChapter == null) {
+            loadContent(durChapterIndex) {
+                success?.invoke()
+            }
+        } else {
+            callBack?.upContent()
+        }
+        if (nextTextChapter == null) {
+            loadContent(durChapterIndex + 1)
+        }
+        if (prevTextChapter == null) {
+            loadContent(durChapterIndex - 1)
+        }
+    }
+
+    /**
+     * 加载章节内容
+     * @param index 章节序号
+     * @param upContent 是否更新视图
+     * @param resetPageOffset 滚动阅读是否重置滚动位置
+     * @param success 加载完成回调
+     */
+    fun loadContent(
+        index: Int,
+        upContent: Boolean = true,
+        resetPageOffset: Boolean = false,
+        success: (() -> Unit)? = null
+    ) {
+        val (book, generation) = currentLoad() ?: return
+        Coroutine.async(this) {
+            val startup = if (book.isEpub) io.legado.app.ui.book.read.epub.EpubStartupTiming("content-read-$index") else null
+            ensureLoadCurrent(book, generation)
+            val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, index) ?: run {
+                completeChapterLoad(book, generation, index, IllegalStateException("章节不存在"))
+                return@async
+            }
+            if (addLoading(index, book, generation)) {
+                try {
+                    startup?.mark("before-content")
+                    val content = BookHelp.getContent(book, chapter)
+                    startup?.mark("content-read")
+                    ensureActive()
+                    ensureLoadCurrent(book, generation)
+                    if (content != null) {
+                        contentLoadFinish(book, chapter, content, upContent, resetPageOffset,
+                            success = success, generation = generation)
+                    } else {
+                        download(downloadScope, book, chapter, generation, resetPageOffset)
+                    }
+                } catch (e: Exception) {
+                    removeLoading(index, book, generation)
+                    throw e
+                }
+            }
+        }.onError {
+            if (it !is CancellationException) AppLog.put("加载正文出错\n${it.localizedMessage}")
+            completeChapterLoad(book, generation, index, it)
+        }
+    }
+
+    suspend fun loadContentAwait(
+        index: Int,
+        upContent: Boolean = true,
+        resetPageOffset: Boolean = false,
+        success: (() -> Unit)? = null
+    ) {
+        val (book, generation) = currentLoad() ?: return
+        withContext(IO) {
+            if (addLoading(index, book, generation)) {
+                try {
+                    val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, index) ?: run {
+                        completeChapterLoad(book, generation, index, IllegalStateException("章节不存在"))
+                        return@withContext
+                    }
+                    val content = BookHelp.getContent(book, chapter) ?: downloadAwait(book, chapter, generation)
+                    ensureActive()
+                    ensureLoadCurrent(book, generation)
+                    contentLoadFinishAwait(book, chapter, content, upContent, resetPageOffset, generation)
+                    withCurrentLoad(book, generation) { success?.invoke() }
+                } catch (e: CancellationException) {
+                    completeChapterLoad(book, generation, index, e)
+                    throw e
+                } catch (e: Exception) {
+                    AppLog.put("加载正文出错\n${e.localizedMessage}")
+                    completeChapterLoad(book, generation, index, e)
+                } finally {
+                    removeLoading(index, book, generation)
+                }
+            }
+        }
+    }
+
+    private suspend fun downloadIndex(index: Int, book: Book, generation: Long) {
+        ensureLoadCurrent(book, generation)
+        if (index < 0) return
+        if (index > chapterSize - 1) {
+            withCurrentLoad(book, generation) { upToc() }
+            return
+        }
+        val chapter = appDb.bookChapterDao.getChapter(book.bookUrl, index) ?: return
+        if (BookHelp.hasContent(book, chapter)) {
+            withCurrentLoad(book, generation) { downloadedChapters.add(chapter.index) }
+        } else {
+            delay(1000)
+            if (addLoading(index, book, generation)) {
+                download(downloadScope, book, chapter, generation, false, preDownloadSemaphore)
+            }
+        }
+    }
+
+    private fun download(
+        scope: CoroutineScope,
+        book: Book,
+        chapter: BookChapter,
+        generation: Long,
+        resetPageOffset: Boolean,
+        semaphore: Semaphore? = null
+    ) = withCurrentLoad(book, generation) {
+        val source = bookSource
+        if (source != null) {
+            CacheBook.getOrCreate(source, book).download(scope, chapter, semaphore, resetPageOffset, generation)
+        } else {
+            val msg = if (book.isLocal) "无内容" else "没有书源"
+            contentLoadFinish(book, chapter, "加载正文失败\n$msg",
+                resetPageOffset = resetPageOffset, generation = generation)
+            completeChapterLoad(book, generation, chapter.index, IllegalStateException(msg))
+        }
+    }
+
+    private suspend fun downloadAwait(book: Book, chapter: BookChapter, generation: Long): String {
+        val source = withCurrentLoad(book, generation) { bookSource }
+        return if (source != null) {
+            CacheBook.getOrCreate(source, book).downloadAwait(chapter, generation)
+        } else {
+            val msg = if (book.isLocal) "无内容" else "没有书源"
+            "加载正文失败\n$msg"
+        }
+    }
+
+    @Synchronized
+    private fun currentLoad(): Pair<Book, Long>? = book
+        ?.takeUnless { it.bookUrl == tocOrderPausedBookUrl }
+        ?.let { it to loadEpoch.current }
+
+    @Synchronized
+    internal fun captureLoadGeneration(bookUrl: String): Long? =
+        if (book?.bookUrl == bookUrl && tocOrderPausedBookUrl != bookUrl) loadEpoch.current else null
+
+    @Synchronized
+    internal fun isLoadCurrent(bookUrl: String, generation: Long): Boolean =
+        book?.bookUrl == bookUrl && tocOrderPausedBookUrl != bookUrl && loadEpoch.isCurrent(generation)
+
+    private fun ensureLoadCurrent(book: Book, generation: Long) {
+        if (!isLoadCurrent(book.bookUrl, generation)) throw CancellationException("Reader changed")
+    }
+
+    @Synchronized
+    private fun <T> withCurrentLoad(book: Book, generation: Long, block: () -> T): T {
+        ensureLoadCurrent(book, generation)
+        return block()
+    }
+
+    private suspend fun notifyEpubLayoutCompleted(book: Book, generation: Long, chapter: TextChapter, upContent: Boolean) {
+        if (!upContent || !book.isEpub) return
+        kotlin.coroutines.coroutineContext.ensureActive()
+        withCurrentLoad(book, generation) {
+            if (chapter.isCompleted && (chapter === prevTextChapter || chapter === curTextChapter || chapter === nextTextChapter)) {
+                // The first two pages can arrive before EPUB can prepare the whole document.
+                // Rebind the completed neighbor without resetting the current page offset.
+                callBack?.onLayoutCompleted()
+            }
+        }
+    }
+
+    @Synchronized
+    internal fun resumePendingContent(book: Book, generation: Long, index: Int, resetPageOffset: Boolean) {
+        if (!isLoadCurrent(book.bookUrl, generation)) return
+        loadingChapters.remove(index)
+        loadContent(index, resetPageOffset = resetPageOffset)
+    }
+
+    @Synchronized
+    internal fun recordDownload(bookUrl: String, generation: Long?, index: Int, failed: Boolean) {
+        if (generation == null || !isLoadCurrent(bookUrl, generation)) return
+        if (failed) downloadFailChapters[index] = (downloadFailChapters[index] ?: 0) + 1
+        else {
+            downloadedChapters.add(index)
+            downloadFailChapters.remove(index)
+        }
+    }
+
+    @Synchronized
+    private fun addLoading(index: Int, book: Book, generation: Long): Boolean {
+        ensureLoadCurrent(book, generation)
+        if (loadingChapters.contains(index)) return false
+        loadingChapters.add(index)
+        return true
+    }
+
+    @Synchronized
+    private fun removeLoading(index: Int, book: Book, generation: Long) {
+        if (isLoadCurrent(book.bookUrl, generation)) loadingChapters.remove(index)
+    }
+
+    @Synchronized
+    fun removeLoading(index: Int) {
+        loadingChapters.remove(index)
+    }
+
+    /**
+     * 内容加载完成
+     */
+    @Synchronized
+    fun contentLoadFinish(
+        book: Book,
+        chapter: BookChapter,
+        content: String,
+        upContent: Boolean = true,
+        resetPageOffset: Boolean,
+        canceled: Boolean = false,
+        success: (() -> Unit)? = null,
+        generation: Long = captureLoadGeneration(book.bookUrl) ?: -1L
+    ) {
+        if (!isLoadCurrent(book.bookUrl, generation) || chapter.bookUrl != book.bookUrl) return
+        removeLoading(chapter.index)
+        if (canceled || chapter.index !in durChapterIndex - 1..durChapterIndex + 1) {
+            completeChapterLoad(book, generation, chapter.index, CancellationException("Reader changed"))
+            return
+        }
+        chapterLoadingJobs[chapter.index]?.cancel()
+        val job = Coroutine.async(this, start = CoroutineStart.LAZY) {
+            val startup = if (book.isEpub) io.legado.app.ui.book.read.epub.EpubStartupTiming("content-prepare-${chapter.index}") else null
+            val contentProcessor = ContentProcessor.get(book.name, book.origin)
+            val displayTitle = chapter.getDisplayTitle(
+                contentProcessor.getTitleReplaceRules(),
+                book.getUseReplaceRule(),
+                replaceBook = book.toReplaceBook()
+            )
+            startup?.mark("title-ready")
+            val contents = contentProcessor
+                .getContent(book, chapter, content, includeTitle = false)
+            startup?.mark("processed")
+            ensureActive()
+            ensureLoadCurrent(book, generation)
+            val textChapter = ChapterProvider.getTextChapterAsync(
+                this, book, chapter, displayTitle, contents, simulatedChapterSize
+            )
+            startup?.mark("native-created")
+            when (val offset = chapter.index - durChapterIndex) {
+                0 -> curChapterLoadingLock.withLock {
+                    withContext(Main) {
+                        ensureActive()
+                        withCurrentLoad(book, generation) { curTextChapter = textChapter }
+                    }
+                    withCurrentLoad(book, generation) { callBack?.upMenuView() }
+                    var available = false
+                    for (page in textChapter.layoutChannel) {
+                        val index = page.index
+                        val bookmarkReady = applyPendingBookmarkNavigation(textChapter)
+                        if (bookmarkReady && !available && page.containPos(durChapterPos)) {
+                            if (upContent) {
+                                withCurrentLoad(book, generation) { callBack?.upContent(offset, resetPageOffset) }
+                            }
+                            available = true
+                        }
+                        if (bookmarkReady && upContent && isScroll) {
+                            if (max(index - 3, 0) < durPageIndex) {
+                                withCurrentLoad(book, generation) { callBack?.upContent(offset, false) }
+                            }
+                        }
+                        withCurrentLoad(book, generation) { callBack?.onLayoutPageCompleted(index, page) }
+                    }
+                    applyPendingBookmarkNavigation(textChapter, completed = true)
+                    if (upContent) withCurrentLoad(book, generation) { callBack?.upContent(offset, !available && resetPageOffset) }
+                    withCurrentLoad(book, generation) { curPageChanged() }
+                    withCurrentLoad(book, generation) { callBack?.contentLoadFinish() }
+                }
+
+                -1 -> prevChapterLoadingLock.withLock {
+                    withContext(Main) {
+                        ensureActive()
+                        withCurrentLoad(book, generation) { prevTextChapter = textChapter }
+                    }
+                    textChapter.layoutChannel.receiveAsFlow().collect()
+                    if (upContent) withCurrentLoad(book, generation) { callBack?.upContent(offset, resetPageOffset) }
+                }
+
+                1 -> nextChapterLoadingLock.withLock {
+                    withContext(Main) {
+                        ensureActive()
+                        withCurrentLoad(book, generation) { nextTextChapter = textChapter }
+                    }
+                    for (page in textChapter.layoutChannel) {
+                        if (page.index > 1) {
+                            continue
+                        }
+                        if (upContent) withCurrentLoad(book, generation) { callBack?.upContent(offset, resetPageOffset) }
+                    }
+                    notifyEpubLayoutCompleted(book, generation, textChapter, upContent)
+                }
+            }
+
+            return@async
+        }
+        job.onError {
+            if (chapterLoadingJobs[chapter.index] === job) {
+                completeChapterLoad(book, generation, chapter.index, it)
+            }
+            if (it is CancellationException) {
+                return@onError
+            }
+            AppLog.put("ChapterProvider ERROR", it)
+            appCtx.toastOnUi("ChapterProvider ERROR:\n${it.stackTraceStr}")
+        }.onSuccess {
+            withCurrentLoad(book, generation) {
+                success?.invoke()
+                if (chapterLoadingJobs[chapter.index] === job) {
+                    completeChapterLoad(book, generation, chapter.index)
+                }
+            }
+        }
+        chapterLoadingJobs[chapter.index] = job
+        job.start()
+    }
+
+    suspend fun contentLoadFinishAwait(
+        book: Book,
+        chapter: BookChapter,
+        content: String,
+        upContent: Boolean = true,
+        resetPageOffset: Boolean,
+        generation: Long = captureLoadGeneration(book.bookUrl) ?: -1L
+    ) {
+        ensureLoadCurrent(book, generation)
+        if (chapter.bookUrl != book.bookUrl) return
+        removeLoading(chapter.index, book, generation)
+        if (chapter.index !in durChapterIndex - 1..durChapterIndex + 1) {
+            return
+        }
+        kotlin.runCatching {
+            val contentProcessor = ContentProcessor.get(book.name, book.origin)
+            val displayTitle = chapter.getDisplayTitle(
+                contentProcessor.getTitleReplaceRules(),
+                book.getUseReplaceRule(),
+                replaceBook = book.toReplaceBook()
+            )
+            val contents = contentProcessor
+                .getContent(book, chapter, content, includeTitle = false)
+            ensureLoadCurrent(book, generation)
+            val textChapter = ChapterProvider.getTextChapterAsync(
+                CoroutineScope(kotlin.coroutines.coroutineContext), book, chapter, displayTitle, contents, simulatedChapterSize
+            )
+            when (val offset = chapter.index - durChapterIndex) {
+                0 -> {
+                    withCurrentLoad(book, generation) { curTextChapter?.cancelLayout() }
+                    withContext(Main) {
+                        withCurrentLoad(book, generation) { curTextChapter = textChapter }
+                    }
+                    withCurrentLoad(book, generation) { callBack?.upMenuView() }
+                    var available = false
+                    for (page in textChapter.layoutChannel) {
+                        val index = page.index
+                        val bookmarkReady = applyPendingBookmarkNavigation(textChapter)
+                        if (bookmarkReady && !available && page.containPos(durChapterPos)) {
+                            if (upContent) {
+                                withCurrentLoad(book, generation) { callBack?.upContent(offset, resetPageOffset) }
+                            }
+                            available = true
+                        }
+                        if (bookmarkReady && upContent && isScroll) {
+                            if (max(index - 3, 0) < durPageIndex) {
+                                withCurrentLoad(book, generation) { callBack?.upContent(offset, false) }
+                            }
+                        }
+                        withCurrentLoad(book, generation) { callBack?.onLayoutPageCompleted(index, page) }
+                    }
+                    applyPendingBookmarkNavigation(textChapter, completed = true)
+                    if (upContent) withCurrentLoad(book, generation) { callBack?.upContent(offset, !available && resetPageOffset) }
+                    withCurrentLoad(book, generation) { curPageChanged() }
+                    withCurrentLoad(book, generation) { callBack?.contentLoadFinish() }
+                }
+
+                -1 -> {
+                    withCurrentLoad(book, generation) { prevTextChapter?.cancelLayout() }
+                    withContext(Main) {
+                        withCurrentLoad(book, generation) { prevTextChapter = textChapter }
+                    }
+                    textChapter.layoutChannel.receiveAsFlow().collect()
+                    if (upContent) withCurrentLoad(book, generation) { callBack?.upContent(offset, resetPageOffset) }
+                }
+
+                1 -> {
+                    withCurrentLoad(book, generation) { nextTextChapter?.cancelLayout() }
+                    withContext(Main) {
+                        withCurrentLoad(book, generation) { nextTextChapter = textChapter }
+                    }
+                    for (page in textChapter.layoutChannel) {
+                        if (page.index > 1) {
+                            continue
+                        }
+                        if (upContent) withCurrentLoad(book, generation) { callBack?.upContent(offset, resetPageOffset) }
+                    }
+                    notifyEpubLayoutCompleted(book, generation, textChapter, upContent)
+                }
+            }
+        }.onFailure {
+            completeChapterLoad(book, generation, chapter.index, it)
+            if (it is CancellationException) {
+                throw it
+            }
+            AppLog.put("ChapterProvider ERROR", it)
+            appCtx.toastOnUi("ChapterProvider ERROR:\n${it.stackTraceStr}")
+        }.onSuccess {
+            completeChapterLoad(book, generation, chapter.index)
+        }
+    }
+
+    /**
+     * 预下载时，章节已完，更新目录
+     */
+    @Synchronized
+    fun upToc() {
+        val bookSource = bookSource ?: return
+        val (book, generation) = currentLoad() ?: return
+        if (!book.canUpdate) return
+        if (chapterSize - durChapterIndex - 1 >= 3) return
+        if (System.currentTimeMillis() - book.lastCheckTime < 600000) return
+        book.lastCheckTime = System.currentTimeMillis()
+        val oldBook = book.copy()
+        WebBook.getChapterList(this, bookSource, book).onSuccess(IO) { cList ->
+            ensureActive()
+            if (!isLoadCurrent(book.bookUrl, generation)) return@onSuccess
+            if (cList.size > chapterSize) {
+                if (oldBook.bookUrl == book.bookUrl) {
+                    appDb.bookDao.update(book)
+                } else {
+                    appDb.bookDao.replace(oldBook, book)
+                    BookHelp.updateCacheFolder(oldBook, book)
+                }
+                appDb.bookChapterDao.delByBook(oldBook.bookUrl)
+                appDb.bookChapterDao.insert(*cList.toTypedArray())
+                onChapterListUpdated(book, false)
+                nextTextChapter ?: loadContent(durChapterIndex + 1)
+            }
+        }
+    }
+
+    fun pageAnim(): Int {
+        return book?.getPageAnim() ?: ReadBookConfig.pageAnim
+    }
+
+    fun setCharset(charset: String) {
+        book?.let {
+            it.charset = charset
+            callBack?.loadChapterList(it)
+        }
+        saveRead()
+    }
+
+    @Synchronized
+    fun saveRead(pageChanged: Boolean = false) {
+        val book = book ?: return
+        if (tocOrderPausedBookUrl == book.bookUrl) return
+        val progress = ReadBookProgressSnapshot(book, bookSource, durChapterIndex, durChapterPos, System.currentTimeMillis())
+        if (!pageChanged) ReadBookConfig.saveBookStyle(book)
+        executor.execute {
+            kotlin.runCatching {
+                if (tocOrderPausedBookUrl == book.bookUrl) return@execute
+                val durTime = progress.time
+                val chapterChanged = progress.apply()
+                if (!pageChanged || chapterChanged) {
+                    appDb.bookChapterDao.getChapter(book.bookUrl, progress.chapterIndex)?.let {
+                        book.durChapterTitle = it.getDisplayTitle(
+                            ContentProcessor.get(book.name, book.origin).getTitleReplaceRules(),
+                            book.getUseReplaceRule(),
+                            replaceBook = book.toReplaceBook()
+                        )
+                        SourceCallBack.callBackBook(SourceCallBack.SAVE_READ, progress.source, book, it, durTime.toString())
+                    }
+                }
+                book.update()
+            }.onFailure {
+                AppLog.put("保存书籍阅读进度信息出错\n$it", it)
+            }
+        }
+    }
+
+    /**
+     * 预下载
+     */
+    private fun preDownload() {
+        val (book, generation) = currentLoad() ?: return
+        if (book.isLocal) return
+        executor.execute {
+            synchronized(this) {
+                if (!isLoadCurrent(book.bookUrl, generation)) return@execute
+                if (AppConfig.preDownloadNum < 2) {
+                    upToc()
+                    return@execute
+                }
+                preDownloadTask?.cancel()
+                preDownloadTask = launch(IO) {
+                    //预下载
+                    launch {
+                        val maxChapterIndex =
+                            min(durChapterIndex + AppConfig.preDownloadNum, chapterSize)
+                        for (i in durChapterIndex.plus(2)..maxChapterIndex) {
+                            if (downloadedChapters.contains(i)) continue
+                            if ((downloadFailChapters[i] ?: 0) >= 3) continue
+                            downloadIndex(i, book, generation)
+                        }
+                    }
+                    launch {
+                        val minChapterIndex = durChapterIndex - min(5, AppConfig.preDownloadNum)
+                        for (i in durChapterIndex.minus(2) downTo minChapterIndex) {
+                            if (downloadedChapters.contains(i)) continue
+                            if ((downloadFailChapters[i] ?: 0) >= 3) continue
+                            downloadIndex(i, book, generation)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fun cancelPreDownloadTask() {
+        if (contentLoadFinish) {
+            preDownloadTask?.cancel()
+            downloadScope.coroutineContext.cancelChildren()
+        }
+    }
+
+    fun onChapterListUpdated(newBook: Book, loadContent: Boolean = true) {
+        if (newBook.isSameNameAuthor(book)) {
+            book = newBook
+            chapterSize = newBook.totalChapterNum
+            simulatedChapterSize = newBook.simulatedTotalChapterNum()
+            if (simulatedChapterSize > 0 && durChapterIndex > simulatedChapterSize - 1) {
+                durChapterIndex = simulatedChapterSize - 1
+            }
+            callBack?.upMenuView()
+            if (callBack == null && !BaseReadAloudService.isRun) {
+                clearTextChapter()
+            } else if (loadContent) {
+                loadContent(true)
+            }
+        }
+    }
+
+    private fun clearExpiredChapterLoadingJob(clearAll: Boolean = false) {
+        val iterator = chapterLoadingJobs.iterator()
+        while (iterator.hasNext()) {
+            val (index, job) = iterator.next()
+            if (clearAll || index !in durChapterIndex - 1..durChapterIndex + 1) {
+                job.cancel()
+                iterator.remove()
+            }
+        }
+    }
+
+    /**
+     * 注册回调
+     */
+    fun register(cb: CallBack) {
+        callBack?.notifyBookChanged()
+        callBack = cb
+    }
+
+    /**
+     * 取消注册回调
+     */
+    fun unregister(cb: CallBack) {
+        if (callBack === cb) {
+            callBack = null
+            releaseAndCancel()
+        }
+    }
+
+    @Synchronized
+    private fun releaseAndCancel() {
+        pendingBookmarkNavigation = null
+        chapterLoadCompletions.cancelAll()
+        loadEpoch.invalidate()
+        msg = null
+        preDownloadTask?.cancel()
+        downloadScope.coroutineContext.cancelChildren()
+        coroutineContext.cancelChildren()
+        ImageProvider.clear()
+        clearExpiredChapterLoadingJob(true)
+        if (!CacheBookService.isRun) {
+            CacheBook.close()
+        }
+    }
+
+    interface CallBack : LayoutProgressListener {
+        fun upMenuView()
+
+        fun loadChapterList(book: Book)
+
+        fun beginReplaceRuleRenderBatch()
+
+        fun endReplaceRuleRenderBatch()
+
+        fun upContent(
+            relativePosition: Int = 0,
+            resetPageOffset: Boolean = true,
+            success: (() -> Unit)? = null
+        )
+
+        suspend fun upContentAwait(
+            relativePosition: Int = 0,
+            resetPageOffset: Boolean = true,
+            success: (() -> Unit)? = null
+        )
+
+        fun pageChanged(manual: Boolean)
+
+        fun contentLoadFinish()
+
+        fun upPageAnim(upRecorder: Boolean = false)
+
+        fun notifyBookChanged()
+
+        fun sureNewProgress(progress: BookProgress)
+
+        fun cancelSelect()
+    }
+
+}
