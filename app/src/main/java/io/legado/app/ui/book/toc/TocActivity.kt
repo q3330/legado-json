@@ -20,11 +20,15 @@ import io.legado.app.data.entities.BookChapter
 import io.legado.app.data.entities.Bookmark
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.ContentProcessor
+import io.legado.app.help.book.MangaChapterCacheTracker
 import io.legado.app.help.book.isAudio
+import io.legado.app.help.book.isImage
 import io.legado.app.help.book.isLocalTxt
 import io.legado.app.help.book.isVideo
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.exoplayer.AudioDownloadCache
+import io.legado.app.help.translate.BookTitleTranslator
+import io.legado.app.help.translate.TranslateConfig
 import io.legado.app.model.ReadBook
 import io.legado.app.ui.about.AppLogDialog
 import io.legado.app.ui.about.NetworkLogDialog
@@ -36,6 +40,7 @@ import io.legado.app.utils.SelectDirectoryContract
 import io.legado.app.utils.longToastOnUi
 import io.legado.app.utils.observeEvent
 import io.legado.app.utils.showDialogFragment
+import io.legado.app.utils.toastOnUi
 import io.legado.app.utils.viewbindingdelegate.viewBinding
 import kotlinx.coroutines.Dispatchers.Default
 import kotlinx.coroutines.Dispatchers.IO
@@ -79,11 +84,17 @@ class TocActivity : VMBaseActivity<ComposeActivityBinding, TocViewModel>(
     private var fullChapterList: List<BookChapter> = emptyList()
     private var chapterJob: Job? = null
     private var displayTitleJob: Job? = null
+    private var translateJob: Job? = null
     private var bookmarkJob: Job? = null
     private var cacheJob: Job? = null
 
     override fun onActivityCreated(savedInstanceState: Bundle?) {
         initContent()
+        lifecycleScope.launch {
+            MangaChapterCacheTracker.states.collect { states ->
+                uiState = uiState.copy(imageCacheProgress = states)
+            }
+        }
         viewModel.bookData.observe(this, ::onBookChanged)
         intent.getStringExtra("bookUrl")?.let(viewModel::initBook)
     }
@@ -100,7 +111,9 @@ class TocActivity : VMBaseActivity<ComposeActivityBinding, TocViewModel>(
     }
 
     private fun onBookChanged(book: Book) {
-        uiState = uiState.withBookSnapshot(book)
+        uiState = uiState.withBookSnapshot(book).copy(
+            translateCatalog = TranslateConfig.isBookCatalogTranslateEnabled(book.bookUrl),
+        )
         loadCachedFiles(book)
         if (viewModel.chapterOrderChanged) {
             setResult(RESULT_OK, Intent().apply {
@@ -122,6 +135,7 @@ class TocActivity : VMBaseActivity<ComposeActivityBinding, TocViewModel>(
         when (event) {
             TocUiEvent.Back -> onBackPressedDispatcher.onBackPressed()
             TocUiEvent.ToggleSort -> uiState = uiState.copy(catalogDescending = !uiState.catalogDescending)
+            TocUiEvent.ToggleTranslate -> toggleCatalogTranslate()
             is TocUiEvent.TabChange -> changeTab(event.tab)
             is TocUiEvent.SearchExpandedChange -> {
                 if (event.expanded) {
@@ -218,6 +232,50 @@ class TocActivity : VMBaseActivity<ComposeActivityBinding, TocViewModel>(
                 displayItems.map { it.chapter.primaryStr() }
             ) {
                 uiState = uiState.copy(chapters = displayItems)
+                if (book.isImage) {
+                    MangaChapterCacheTracker.syncBookChapters(book, chapters)
+                }
+                if (uiState.translateCatalog) {
+                    translateChapterTitles(displayItems)
+                }
+            }
+        }
+    }
+
+    private fun toggleCatalogTranslate() {
+        val book = viewModel.bookData.value ?: return
+        val next = !uiState.translateCatalog
+        TranslateConfig.setBookCatalogTranslateEnabled(book.bookUrl, next)
+        uiState = uiState.copy(translateCatalog = next)
+        toastOnUi(if (next) "已开启目录翻译" else "已关闭目录翻译")
+        if (next) {
+            translateChapterTitles(uiState.chapters)
+        } else {
+            translateJob?.cancel()
+        }
+    }
+
+    private fun translateChapterTitles(items: List<TocChapterUiItem>) {
+        translateJob?.cancel()
+        if (items.isEmpty()) return
+        translateJob = lifecycleScope.launch {
+            val merged = uiState.translatedTitles.toMutableMap()
+            val titles = items.map { it.displayTitle }.distinct()
+            titles.forEach { t ->
+                BookTitleTranslator.getCached(t)?.let { merged[t] = it }
+            }
+            if (merged.size != uiState.translatedTitles.size) {
+                uiState = uiState.copy(translatedTitles = merged.toMap())
+            }
+            val pending = titles.filter { it !in merged && BookTitleTranslator.needsTranslation(it) }
+            if (pending.isEmpty()) return@launch
+            pending.chunked(30).forEach { batch ->
+                if (!uiState.translateCatalog) return@launch
+                val res = withContext(IO) { BookTitleTranslator.translateBatch(batch) }
+                if (res.isNotEmpty()) {
+                    merged.putAll(res)
+                    uiState = uiState.copy(translatedTitles = merged.toMap())
+                }
             }
         }
     }

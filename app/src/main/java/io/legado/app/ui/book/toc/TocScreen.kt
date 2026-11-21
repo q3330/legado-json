@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -68,9 +69,13 @@ import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookChapter
 import io.legado.app.data.entities.Bookmark
 import io.legado.app.data.entities.CatalogOutlineEntry
+import io.legado.app.help.book.ChapterImageCacheProgress
+import io.legado.app.help.book.MangaChapterCacheTracker
+import io.legado.app.help.book.isImage
 import io.legado.app.help.book.isLocal
 import io.legado.app.help.book.isVideo
 import io.legado.app.help.config.NgThemeModeStore
+import io.legado.app.ui.book.explore.ExploreToolbarButton
 import io.legado.app.ui.book.read.CatalogVipIcon
 import io.legado.app.ui.design.components.compose.NgBookCover
 import io.legado.app.ui.design.components.compose.NgExpandableActionMenu
@@ -121,6 +126,9 @@ internal data class TocUiState(
     val loadWordCount: Boolean = false,
     val splitLongChapter: Boolean = false,
     val isLocalTxt: Boolean = false,
+    val translateCatalog: Boolean = false,
+    val translatedTitles: Map<String, String> = emptyMap(),
+    val imageCacheProgress: Map<String, ChapterImageCacheProgress> = emptyMap(),
 )
 
 internal enum class TocMenuAction(val itemId: Int) {
@@ -145,6 +153,7 @@ internal enum class TocMenuAction(val itemId: Int) {
 internal sealed interface TocUiEvent {
     data object Back : TocUiEvent
     data object ToggleSort : TocUiEvent
+    data object ToggleTranslate : TocUiEvent
     data class TabChange(val tab: Int) : TocUiEvent
     data class SearchExpandedChange(val expanded: Boolean) : TocUiEvent
     data class QueryChange(val query: String) : TocUiEvent
@@ -292,6 +301,17 @@ private fun TocTopBar(
             onBack = { onEvent(TocUiEvent.Back) },
             modifier = Modifier.padding(horizontal = 10.dp),
             trailingContent = {
+                ExploreToolbarButton(
+                    iconRes = R.drawable.ic_translate,
+                    description = stringResource(R.string.explore_auto_translate),
+                    tint = if (state.translateCatalog) Color(NgTheme.colors.primary) else colorResource(R.color.ng_search_icon),
+                    onClick = { onEvent(TocUiEvent.ToggleTranslate) },
+                    modifier = Modifier.background(
+                        if (state.translateCatalog) Color(NgTheme.colors.primary).copy(alpha = 0.13f)
+                        else Color.Transparent,
+                        RoundedCornerShape(10.dp),
+                    ),
+                )
                 NgFloatingToolbarActionButton(
                     iconRes = R.drawable.ic_search,
                     contentDescription = stringResource(R.string.search),
@@ -614,12 +634,22 @@ private fun TocChapterPage(
                 contentType = { if (it.isVolume) "volume" else "chapter" },
             ) { row ->
                 val item = itemsByKey.getValue(row.url)
+                val resolvedTitle = if (state.translateCatalog) {
+                    state.translatedTitles[item.displayTitle] ?: item.displayTitle
+                } else {
+                    item.displayTitle
+                }
+                val imgProgress = if (state.book?.isImage == true && !item.chapter.isVolume) {
+                    state.imageCacheProgress[MangaChapterCacheTracker.key(bookKey, item.chapter.index)]
+                } else null
                 TocChapterRow(
                     item = item,
+                    resolvedTitle = resolvedTitle,
                     current = item.chapter.index == state.book?.durChapterIndex,
                     cached = state.book?.isLocal == true ||
                         item.chapter.isVolume ||
                         item.chapter.getFileName() in state.cachedFileNames,
+                    imageProgress = imgProgress,
                     showWordCount = state.loadWordCount,
                     collapsed = item.chapter.primaryStr() in collapsedVolumes,
                     onToggleVolume = if (item.chapter.isVolume && foldEnabled) {
@@ -630,7 +660,7 @@ private fun TocChapterPage(
                             toggleVolume(item)
                         } else onEvent(TocUiEvent.ChapterClick(item.chapter))
                     },
-                    onLongClick = { onEvent(TocUiEvent.ChapterLongClick(item.displayTitle)) },
+                    onLongClick = { onEvent(TocUiEvent.ChapterLongClick(resolvedTitle)) },
                 )
             }
         }
@@ -641,8 +671,10 @@ private fun TocChapterPage(
 @Composable
 private fun TocChapterRow(
     item: TocChapterUiItem,
+    resolvedTitle: String,
     current: Boolean,
     cached: Boolean,
+    imageProgress: ChapterImageCacheProgress?,
     showWordCount: Boolean,
     collapsed: Boolean,
     onToggleVolume: (() -> Unit)?,
@@ -652,6 +684,8 @@ private fun TocChapterRow(
     val chapter = item.chapter
     val secondary = Color(NgTheme.colors.onSurfaceVariant)
     val leading = if (chapter.isVolume) 44.dp else 8.dp
+    val progressFraction = imageProgress?.visualFraction ?: 0f
+    val greenColor = Color(0xFF22C55E)
     Box(
         modifier = Modifier.fillMaxWidth()
             .background(
@@ -661,6 +695,24 @@ private fun TocChapterRow(
                 else Color.Transparent,
             ),
     ) {
+        if (progressFraction > 0f) {
+            Box(modifier = Modifier.matchParentSize()) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .fillMaxHeight()
+                        .fillMaxWidth(progressFraction.coerceIn(0f, 1f))
+                        .background(greenColor.copy(alpha = if (imageProgress?.isCompleted == true) 0.22f else 0.16f))
+                )
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth(progressFraction.coerceIn(0f, 1f))
+                        .height(2.5.dp)
+                        .background(greenColor)
+                )
+            }
+        }
         Row(
             modifier = Modifier.fillMaxWidth().padding(end = 20.dp).heightIn(min = 44.dp)
                 .semantics { selected = current }
@@ -678,7 +730,7 @@ private fun TocChapterRow(
             }
             Column(Modifier.weight(1f)) {
                 Text(
-                    text = item.displayTitle,
+                    text = resolvedTitle,
                     color = if (current) Color(NgTheme.colors.primary) else secondary,
                     fontSize = 15.sp,
                     lineHeight = 20.sp,
@@ -697,6 +749,15 @@ private fun TocChapterRow(
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
+            }
+            if (imageProgress != null && imageProgress.total > 0 && progressFraction > 0f) {
+                Text(
+                    text = if (imageProgress.isCompleted) "已缓存" else "${imageProgress.cached}/${imageProgress.total}",
+                    color = Color(0xFF16A34A),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                )
             }
             chapter.wordCount?.takeIf {
                 showWordCount && !chapter.isVolume && it.isNotBlank()

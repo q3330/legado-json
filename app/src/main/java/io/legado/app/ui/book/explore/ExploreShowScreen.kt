@@ -40,6 +40,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -63,14 +65,18 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import io.legado.app.R
 import io.legado.app.data.entities.BookSource
 import io.legado.app.data.entities.SearchBook
 import io.legado.app.data.entities.rule.ExploreKind
 import io.legado.app.data.entities.rule.ExploreKind.Type
+import io.legado.app.help.config.AppConfig
+import io.legado.app.help.translate.BookTitleTranslator
 import io.legado.app.ui.book.search.SearchBookCover
 import io.legado.app.ui.book.search.SearchCoverBitmapCache
 import io.legado.app.ui.book.search.SearchResultCard
@@ -94,7 +100,9 @@ import io.legado.app.ui.main.explore.rememberExploreKindLabel
 import io.legado.app.ui.main.explore.sourceTileColor
 import io.legado.app.ui.main.explore.sourceTileContentColor
 import io.legado.app.utils.InfoMap
+import kotlinx.coroutines.Dispatchers.IO
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private val ExploreCategoryTileHeight = 62.dp
 private val ExploreCategoryRowSpacing = 6.dp
@@ -195,6 +203,45 @@ internal fun ExploreShowContentCard(
         } else {
             kindSections.sections
         }
+    val translatedCategoryLabels = remember(state.source?.bookSourceUrl) {
+        mutableStateMapOf<String, String>()
+    }
+    LaunchedEffect(state.autoTranslateEnabled, state.kinds, state.selectedKind) {
+        if (!state.autoTranslateEnabled) return@LaunchedEffect
+        val labels = buildList {
+            state.selectedKind?.title?.let(::sanitizeExploreDetailLabel)?.takeIf { it.isNotBlank() }?.let(::add)
+            state.kinds.forEach { kind ->
+                sanitizeExploreDetailLabel(kind.title).takeIf { it.isNotBlank() }?.let(::add)
+            }
+            kindSections.sections.forEach { section ->
+                section.header?.displaySectionLabel()?.let(::sanitizeExploreDetailLabel)
+                    ?.takeIf { it.isNotBlank() }?.let(::add)
+            }
+        }.distinct()
+        labels.forEach { label ->
+            BookTitleTranslator.getCached(label)?.let { translatedCategoryLabels[label] = it }
+        }
+        val uncached = labels.filter { it !in translatedCategoryLabels && BookTitleTranslator.needsTranslation(it) }
+        if (uncached.isNotEmpty()) {
+            uncached.chunked(25).forEach { batch ->
+                val result = withContext(IO) { BookTitleTranslator.translateBatch(batch) }
+                if (result.isNotEmpty()) {
+                    translatedCategoryLabels.putAll(result)
+                }
+            }
+        }
+    }
+    val translateCategoryLabel: (String) -> String = { raw ->
+        val clean = sanitizeExploreDetailLabel(raw)
+        if (state.autoTranslateEnabled && clean.isNotBlank()) {
+            translatedCategoryLabels[clean] ?: BookTitleTranslator.getCached(clean) ?: clean
+        } else {
+            clean
+        }
+    }
+    var categoryLayoutMode by remember {
+        mutableStateOf(ExploreShowLayoutMode.from(AppConfig.exploreCategoryLayoutMode))
+    }
     val sectionRows = visibleSections.map { section ->
         section to calculateExploreDetailKindRows(section.items)
     }
@@ -282,7 +329,7 @@ internal fun ExploreShowContentCard(
             } else {
                 ExploreContentToolbar(
                     selectedKindLabel = state.selectedKind?.title
-                        ?.let(::sanitizeExploreDetailLabel)
+                        ?.let(translateCategoryLabel)
                         .orEmpty(),
                     page = currentPage,
                     layoutMode = layoutMode,
@@ -440,9 +487,15 @@ internal fun ExploreShowContentCard(
                 ExploreCategoryPanel(
                     state = state,
                     kindSections = kindSections,
-                    sectionRows = sectionRows,
+                    visibleSections = visibleSections,
                     controlRows = controlRows,
                     activeSectionIndex = activeSectionIndex,
+                    categoryLayoutMode = categoryLayoutMode,
+                    onCategoryLayoutModeChange = { next ->
+                        categoryLayoutMode = next
+                        AppConfig.exploreCategoryLayoutMode = next.value
+                    },
+                    translateCategoryLabel = translateCategoryLabel,
                     onSelectKind = onSelectKind,
                     onOpenKind = selectKind,
                     onRefreshKinds = onRefreshKinds,
@@ -457,9 +510,12 @@ internal fun ExploreShowContentCard(
 private fun ExploreCategoryPanel(
     state: ExploreShowUiState,
     kindSections: ExploreKindSections,
-    sectionRows: List<Pair<ExploreKindSection, List<List<Pair<ExploreKind, Int>>>>>,
+    visibleSections: List<ExploreKindSection>,
     controlRows: List<List<Pair<ExploreKind, Int>>>,
     activeSectionIndex: Int,
+    categoryLayoutMode: ExploreShowLayoutMode,
+    onCategoryLayoutModeChange: (ExploreShowLayoutMode) -> Unit,
+    translateCategoryLabel: (String) -> String,
     onSelectKind: (ExploreKind) -> Unit,
     onOpenKind: (ExploreKind) -> Unit,
     onRefreshKinds: () -> Unit,
@@ -469,6 +525,13 @@ private fun ExploreCategoryPanel(
     val ungroupedLabel = stringResource(R.string.no_group)
     val scrollState = rememberScrollState()
     val scrollThumbColor = colorResource(R.color.secondaryText).copy(alpha = 0.32f)
+    val infoMap = remember(state.source?.bookSourceUrl) {
+        val sourceUrl = state.source?.bookSourceUrl.orEmpty()
+        ExploreInfoStore.infoMapList[sourceUrl] ?: InfoMap(sourceUrl).also {
+            ExploreInfoStore.infoMapList.put(sourceUrl, it)
+        }
+    }
+    val sourceJsExtensions = rememberExploreSourceJsExtensions(state.source, infoMap, onRefreshKinds)
     LaunchedEffect(activeSectionIndex, state.kinds) {
         scrollState.scrollTo(0)
     }
@@ -476,26 +539,45 @@ private fun ExploreCategoryPanel(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 12.dp, top = 8.dp, end = 8.dp, bottom = 8.dp)
+            .padding(start = 12.dp, top = 6.dp, end = 8.dp, bottom = 8.dp)
     ) {
-        if (kindSections.useTopLevelGroups && kindSections.sections.size > 1) {
-            val sectionLabels = kindSections.sections.map { section ->
-                section.header?.let { header ->
-                    sanitizeExploreDetailLabel(header.displaySectionLabel())
-                        .ifBlank { fallbackLabel }
-                } ?: ungroupedLabel
-            }
-            ExploreSectionDropdown(
-                modifier = Modifier.align(Alignment.End),
-                labels = sectionLabels,
-                selectedIndex = activeSectionIndex,
-                onSelectSection = { index ->
-                    kindSections.kindForSectionSelection(index, state.selectedKind)
-                        ?.takeIf { nextKind -> nextKind != state.selectedKind }
-                        ?.let(onSelectKind)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(end = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (kindSections.useTopLevelGroups && kindSections.sections.size > 1) {
+                val sectionLabels = kindSections.sections.map { section ->
+                    section.header?.let { header ->
+                        translateCategoryLabel(header.displaySectionLabel())
+                            .ifBlank { fallbackLabel }
+                    } ?: ungroupedLabel
                 }
+                ExploreSectionDropdown(
+                    modifier = Modifier.weight(1f),
+                    labels = sectionLabels,
+                    selectedIndex = activeSectionIndex,
+                    onSelectSection = { index ->
+                        kindSections.kindForSectionSelection(index, state.selectedKind)
+                            ?.takeIf { nextKind -> nextKind != state.selectedKind }
+                            ?.let(onSelectKind)
+                    }
+                )
+            } else {
+                Text(
+                    text = stringResource(R.string.explore_show_categories),
+                    modifier = Modifier.weight(1f).padding(start = 4.dp),
+                    color = colorResource(R.color.secondaryText),
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                )
+            }
+            ExploreLayoutModePopupButton(
+                layoutMode = categoryLayoutMode,
+                onLayoutModeChange = onCategoryLayoutModeChange,
             )
-            Spacer(Modifier.height(4.dp))
         }
 
         Box(
@@ -530,22 +612,70 @@ private fun ExploreCategoryPanel(
                         row = row,
                         source = state.source,
                         selectedKind = state.selectedKind,
+                        translateCategoryLabel = translateCategoryLabel,
                         onSelectKind = onOpenKind,
                         onRefreshKinds = onRefreshKinds,
                         onShowError = onShowError
                     )
                 }
 
-                sectionRows.forEach { (_, rows) ->
-                    rows.forEach { row ->
-                        ExploreCategoryRow(
-                            row = row,
-                            source = state.source,
-                            selectedKind = state.selectedKind,
-                            onSelectKind = onOpenKind,
-                            onRefreshKinds = onRefreshKinds,
-                            onShowError = onShowError
-                        )
+                val columns = categoryLayoutMode.columns
+                val isList = categoryLayoutMode == ExploreShowLayoutMode.LIST
+                visibleSections.forEach { section ->
+                    val urlKinds = section.items.filter { it.type == Type.url && !it.url.isNullOrBlank() }
+                    val nonUrlKinds = section.items.filterNot { it.type == Type.url && !it.url.isNullOrBlank() }
+                    if (nonUrlKinds.isNotEmpty()) {
+                        calculateExploreDetailKindRows(nonUrlKinds).forEach { row ->
+                            ExploreCategoryRow(
+                                row = row,
+                                source = state.source,
+                                selectedKind = state.selectedKind,
+                                translateCategoryLabel = translateCategoryLabel,
+                                onSelectKind = onOpenKind,
+                                onRefreshKinds = onRefreshKinds,
+                                onShowError = onShowError,
+                            )
+                        }
+                    }
+                    if (isList || columns == 1) {
+                        urlKinds.forEach { kind ->
+                            ExploreCategoryTile(
+                                kind = kind,
+                                source = state.source,
+                                infoMap = infoMap,
+                                selected = kind == state.selectedKind,
+                                wide = true,
+                                columns = 1,
+                                translateCategoryLabel = translateCategoryLabel,
+                                onClick = { onOpenKind(kind) },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    } else {
+                        urlKinds.chunked(columns).forEach { rowItems ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                rowItems.forEach { kind ->
+                                    ExploreCategoryTile(
+                                        kind = kind,
+                                        source = state.source,
+                                        infoMap = infoMap,
+                                        selected = kind == state.selectedKind,
+                                        wide = columns <= 2,
+                                        columns = columns,
+                                        translateCategoryLabel = translateCategoryLabel,
+                                        onClick = { onOpenKind(kind) },
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                }
+                                if (rowItems.size < columns) {
+                                    Spacer(Modifier.weight((columns - rowItems.size).toFloat()))
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -743,6 +873,7 @@ private fun ExploreCategoryRow(
     row: List<Pair<ExploreKind, Int>>,
     source: BookSource?,
     selectedKind: ExploreKind?,
+    translateCategoryLabel: (String) -> String = ::sanitizeExploreDetailLabel,
     onSelectKind: (ExploreKind) -> Unit,
     onRefreshKinds: () -> Unit,
     onShowError: (String) -> Unit
@@ -770,6 +901,7 @@ private fun ExploreCategoryRow(
                     infoMap = infoMap,
                     selected = kind == selectedKind,
                     wide = span >= EXPLORE_DETAIL_MAX_SPAN,
+                    translateCategoryLabel = translateCategoryLabel,
                     onClick = { onSelectKind(kind) },
                     modifier = Modifier.weight(span.toFloat())
                 )
@@ -782,7 +914,7 @@ private fun ExploreCategoryRow(
                     onOpenKind = onSelectKind,
                     onShowError = onShowError,
                     displayLabelTransform = { label ->
-                        sanitizeExploreDetailLabel(label).ifBlank { fallbackLabel }
+                        translateCategoryLabel(label).ifBlank { fallbackLabel }
                     },
                     modifier = Modifier.weight(span.toFloat())
                 )
@@ -801,17 +933,14 @@ private fun ExploreCategoryTile(
     infoMap: InfoMap,
     selected: Boolean,
     wide: Boolean,
+    columns: Int = 4,
+    translateCategoryLabel: (String) -> String = ::sanitizeExploreDetailLabel,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val sourceLabel by rememberExploreKindLabel(kind, source, infoMap)
     val fallbackLabel = stringResource(R.string.explore_category_default)
-    val label = remember(sourceLabel, fallbackLabel) {
-        sanitizeExploreDetailLabel(sourceLabel).ifBlank { fallbackLabel }
-    }
-    val compactLabel = remember(label) {
-        if (label.length > 4) "${label.take(4)}…" else label
-    }
+    val label = translateCategoryLabel(sourceLabel).ifBlank { fallbackLabel }
     val primary = Color(NgTheme.colors.primary)
     val tileColorInt = remember(source?.bookSourceUrl, kind.title) {
         sourceTileColor("${source?.bookSourceUrl}#${kind.title}")
@@ -821,40 +950,46 @@ private fun ExploreCategoryTile(
     if (wide) {
         Row(
             modifier = modifier
-                .height(ExploreCategoryTileHeight)
+                .height(if (columns == 1) 48.dp else 52.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(if (selected) primary.copy(alpha = 0.10f) else Color.Transparent)
                 .clickable(onClick = onClick)
-                .padding(horizontal = 12.dp),
+                .padding(horizontal = if (columns == 1) 10.dp else 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            ExploreCategoryGlyph(label, tileColor, tileContentColor, 36.dp)
+            ExploreCategoryGlyph(label, tileColor, tileContentColor, if (columns == 1) 32.dp else 30.dp)
             Text(
                 text = label,
                 modifier = Modifier
                     .weight(1f)
-                    .padding(horizontal = 12.dp),
+                    .padding(start = 10.dp, end = 4.dp),
                 color = if (selected) primary else colorResource(R.color.primaryText),
-                fontSize = 16.sp,
+                fontSize = if (columns == 1) 14.sp else 13.sp,
+                lineHeight = 17.sp,
                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                maxLines = 1,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
         }
     } else {
         Column(
             modifier = modifier
-                .height(ExploreCategoryTileHeight)
-                .clickable(onClick = onClick),
+                .height(ExploreCategoryTileHeight + 6.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(if (selected) primary.copy(alpha = 0.10f) else Color.Transparent)
+                .clickable(onClick = onClick)
+                .padding(horizontal = 4.dp, vertical = 4.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            ExploreCategoryGlyph(label, tileColor, tileContentColor, 36.dp)
-            Spacer(Modifier.height(2.dp))
+            ExploreCategoryGlyph(label, tileColor, tileContentColor, if (columns <= 3) 34.dp else 32.dp)
+            Spacer(Modifier.height(3.dp))
             Text(
-                text = compactLabel,
+                text = label,
                 color = if (selected) primary else colorResource(R.color.primaryText),
-                fontSize = 12.sp,
+                fontSize = if (columns <= 3) 12.sp else 11.sp,
                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                maxLines = 1,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
                 textAlign = TextAlign.Center,
                 lineHeight = 13.sp
@@ -894,19 +1029,21 @@ internal fun ExploreCategoryGlyph(
 @Composable
 internal fun ExploreContentToolbar(
     selectedKindLabel: String,
-    page: Int,
+    page: Int = 1,
     layoutMode: ExploreShowLayoutMode,
-    onToggleCategories: () -> Unit = {},
-    onSelectPage: () -> Unit,
-    navigationAvailable: Boolean,
-    gridState: LazyGridState,
-    canGoPrevious: Boolean,
-    canGoNext: Boolean,
-    onPrevious: () -> Unit,
-    onNext: () -> Unit,
-    onLayoutModeChange: (ExploreShowLayoutMode) -> Unit
+    onToggleCategories: (() -> Unit)? = null,
+    onSelectPage: () -> Unit = {},
+    navigationAvailable: Boolean = false,
+    gridState: LazyGridState? = null,
+    canGoPrevious: Boolean = false,
+    canGoNext: Boolean = false,
+    onPrevious: () -> Unit = {},
+    onNext: () -> Unit = {},
+    onLayoutModeChange: (ExploreShowLayoutMode) -> Unit,
+    showPagination: Boolean = true,
+    trailingSummary: String? = null,
 ) {
-    val navigationEnabled = navigationAvailable && !gridState.isScrollInProgress
+    val navigationEnabled = navigationAvailable && gridState?.isScrollInProgress != true
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -921,7 +1058,13 @@ internal fun ExploreContentToolbar(
             modifier = Modifier
                 .weight(1f)
                 .clip(RoundedCornerShape(8.dp))
-                .clickable(onClick = onToggleCategories)
+                .then(
+                    if (onToggleCategories != null) {
+                        Modifier.clickable(onClick = onToggleCategories)
+                    } else {
+                        Modifier
+                    }
+                )
                 .padding(vertical = 4.dp),
             color = colorResource(R.color.primaryText),
             fontSize = 16.sp,
@@ -929,29 +1072,40 @@ internal fun ExploreContentToolbar(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
-        ExplorePageButton(
-            iconRes = R.drawable.ic_chevron_left_20,
-            description = stringResource(R.string.prev_page),
-            enabled = navigationEnabled && canGoPrevious,
-            onClick = onPrevious
-        )
-        Text(
-            text = stringResource(R.string.menu_page, page),
-            modifier = Modifier
-                .clip(RoundedCornerShape(12.dp))
-                .clickable(enabled = navigationEnabled, onClick = onSelectPage)
-                .padding(horizontal = 4.dp, vertical = 8.dp),
-            color = colorResource(R.color.secondaryText),
-            fontSize = 12.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-        ExplorePageButton(
-            iconRes = R.drawable.ic_chevron_right_20,
-            description = stringResource(R.string.next_page),
-            enabled = navigationEnabled && canGoNext,
-            onClick = onNext
-        )
+        if (showPagination) {
+            ExplorePageButton(
+                iconRes = R.drawable.ic_chevron_left_20,
+                description = stringResource(R.string.prev_page),
+                enabled = navigationEnabled && canGoPrevious,
+                onClick = onPrevious
+            )
+            Text(
+                text = stringResource(R.string.menu_page, page),
+                modifier = Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable(enabled = navigationEnabled, onClick = onSelectPage)
+                    .padding(horizontal = 4.dp, vertical = 8.dp),
+                color = colorResource(R.color.secondaryText),
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            ExplorePageButton(
+                iconRes = R.drawable.ic_chevron_right_20,
+                description = stringResource(R.string.next_page),
+                enabled = navigationEnabled && canGoNext,
+                onClick = onNext
+            )
+        } else if (!trailingSummary.isNullOrBlank()) {
+            Text(
+                text = trailingSummary,
+                modifier = Modifier.padding(horizontal = 6.dp),
+                color = colorResource(R.color.secondaryText),
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
         ExploreLayoutModePopupButton(
             layoutMode = layoutMode,
             onLayoutModeChange = onLayoutModeChange,
@@ -965,36 +1119,21 @@ internal fun ExploreLayoutModePopupButton(
     onLayoutModeChange: (ExploreShowLayoutMode) -> Unit,
 ) {
     val menuState = remember { NgPopupToggleState() }
-    val menuItems = remember(layoutMode) {
-        listOf(
-            NgExpandableActionMenuItem(
-                itemId = ExploreShowLayoutMode.LIST.value,
-                titleRes = 0,
-                iconRes = R.drawable.ic_chapter_list,
-                title = "列表视图",
-                checked = layoutMode == ExploreShowLayoutMode.LIST,
-            ),
-            NgExpandableActionMenuItem(
-                itemId = ExploreShowLayoutMode.GRID_2.value,
-                titleRes = 0,
-                iconRes = R.drawable.ic_grid_menu,
-                title = "2列网格",
-                checked = layoutMode == ExploreShowLayoutMode.GRID_2,
-            ),
-            NgExpandableActionMenuItem(
-                itemId = ExploreShowLayoutMode.GRID.value,
-                titleRes = 0,
-                iconRes = R.drawable.ic_view_quilt,
-                title = "3列网格",
-                checked = layoutMode == ExploreShowLayoutMode.GRID,
-            ),
-        )
+    var lastGridColumns by remember {
+        mutableIntStateOf(if (layoutMode.isGrid) layoutMode.columns else 3)
     }
-    val currentIconRes = when (layoutMode) {
-        ExploreShowLayoutMode.LIST -> R.drawable.ic_chapter_list
-        ExploreShowLayoutMode.GRID_2 -> R.drawable.ic_grid_menu
-        ExploreShowLayoutMode.GRID -> R.drawable.ic_view_quilt
+    LaunchedEffect(layoutMode) {
+        if (layoutMode.isGrid) lastGridColumns = layoutMode.columns
     }
+    val currentIconRes = when {
+        !layoutMode.isGrid -> R.drawable.ic_chapter_list
+        layoutMode.columns <= 2 -> R.drawable.ic_grid_menu
+        else -> R.drawable.ic_view_quilt
+    }
+    val primary = Color(NgTheme.colors.primary)
+    val primaryText = colorResource(R.color.primaryText)
+    val secondaryText = colorResource(R.color.secondaryText)
+
     Box {
         ExploreLayoutButton(
             selected = menuState.expanded,
@@ -1002,21 +1141,150 @@ internal fun ExploreLayoutModePopupButton(
             description = stringResource(R.string.switchLayout),
             onClick = menuState::onAnchorClick,
         )
-        NgExpandableActionMenu(
-            expanded = menuState.expanded,
-            onDismissRequest = menuState::onDismissRequest,
-            items = menuItems,
-            variant = NgExpandableActionMenuVariant.SIDE_SLIDE,
-            sideSlideEndMargin = 14.dp,
-            sideSlideAnchorGap = 6.dp,
-            width = 148.dp,
-            properties = PopupProperties(focusable = true, clippingEnabled = false),
-            onItemClick = { item ->
-                if (!menuState.expanded) return@NgExpandableActionMenu
-                menuState.close()
-                onLayoutModeChange(ExploreShowLayoutMode.from(item.itemId))
-            },
-        )
+        if (menuState.expanded) {
+            Popup(
+                alignment = Alignment.TopEnd,
+                offset = IntOffset(0, 96),
+                onDismissRequest = menuState::onDismissRequest,
+                properties = PopupProperties(focusable = true, clippingEnabled = false),
+            ) {
+                NgGlassSurface(
+                    modifier = Modifier.width(214.dp),
+                    role = NgMaterialRole.CONTROL,
+                    shape = RoundedCornerShape(14.dp),
+                    style = NgGlassDefaults.bookDetailStyle(
+                        containerColor = colorResource(R.color.ng_surface_card)
+                    ),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 6.dp, horizontal = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        val isList = layoutMode == ExploreShowLayoutMode.LIST
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (isList) primary.copy(alpha = 0.12f) else Color.Transparent)
+                                .clickable {
+                                    menuState.close()
+                                    onLayoutModeChange(ExploreShowLayoutMode.LIST)
+                                }
+                                .padding(horizontal = 10.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_chapter_list),
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                                tint = if (isList) primary else secondaryText,
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                text = "列表视图",
+                                modifier = Modifier.weight(1f),
+                                color = if (isList) primary else primaryText,
+                                fontSize = 14.sp,
+                                fontWeight = if (isList) FontWeight.SemiBold else FontWeight.Normal,
+                            )
+                            if (isList) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_check),
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp),
+                                    tint = primary,
+                                )
+                            }
+                        }
+
+                        HorizontalDivider(
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            thickness = 0.5.dp,
+                            color = secondaryText.copy(alpha = 0.14f),
+                        )
+
+                        val isGrid = layoutMode.isGrid
+                        val activeCols = if (isGrid) layoutMode.columns else lastGridColumns
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (isGrid) primary.copy(alpha = 0.12f) else Color.Transparent)
+                                .clickable {
+                                    onLayoutModeChange(ExploreShowLayoutMode.gridForColumns(activeCols))
+                                }
+                                .padding(start = 10.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_grid_menu),
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                                tint = if (isGrid) primary else secondaryText,
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                text = "网格",
+                                modifier = Modifier.weight(1f),
+                                color = if (isGrid) primary else primaryText,
+                                fontSize = 14.sp,
+                                fontWeight = if (isGrid) FontWeight.SemiBold else FontWeight.Normal,
+                            )
+                            val canMinus = !isGrid || activeCols > 1
+                            val canPlus = !isGrid || activeCols < 4
+                            Box(
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(primary.copy(alpha = if (canMinus) 0.10f else 0.04f))
+                                    .clickable(enabled = canMinus) {
+                                        val nextCols = if (isGrid) (activeCols - 1).coerceIn(1, 4) else activeCols
+                                        lastGridColumns = nextCols
+                                        onLayoutModeChange(ExploreShowLayoutMode.gridForColumns(nextCols))
+                                    },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    text = "−",
+                                    color = if (canMinus) primary else secondaryText.copy(alpha = 0.35f),
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                            }
+                            Text(
+                                text = "${activeCols}列",
+                                modifier = Modifier.width(34.dp),
+                                color = if (isGrid) primary else primaryText,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
+                                textAlign = TextAlign.Center,
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(primary.copy(alpha = if (canPlus) 0.10f else 0.04f))
+                                    .clickable(enabled = canPlus) {
+                                        val nextCols = if (isGrid) (activeCols + 1).coerceIn(1, 4) else activeCols
+                                        lastGridColumns = nextCols
+                                        onLayoutModeChange(ExploreShowLayoutMode.gridForColumns(nextCols))
+                                    },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    text = "+",
+                                    color = if (canPlus) primary else secondaryText.copy(alpha = 0.35f),
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1094,8 +1362,18 @@ private fun ExploreBookGridCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(0.74f),
-                coverWidth = if (columns == 2) 156.dp else 108.dp,
-                coverHeight = if (columns == 2) 210.dp else 146.dp,
+                coverWidth = when (columns) {
+                    1 -> 220.dp
+                    2 -> 156.dp
+                    4 -> 84.dp
+                    else -> 108.dp
+                },
+                coverHeight = when (columns) {
+                    1 -> 296.dp
+                    2 -> 210.dp
+                    4 -> 114.dp
+                    else -> 146.dp
+                },
                 bitmapCache = coverBitmapCache,
             )
             if (inBookshelf) {

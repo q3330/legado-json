@@ -61,6 +61,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -76,11 +77,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.ViewCompositionStrategy
@@ -111,12 +114,18 @@ import io.legado.app.data.entities.BookChapter
 import io.legado.app.data.entities.CatalogOutlineEntry
 import io.legado.app.data.entities.Bookmark
 import io.legado.app.help.book.BookHelp
+import io.legado.app.help.book.ChapterImageCacheProgress
 import io.legado.app.help.book.ContentProcessor
+import io.legado.app.help.book.MangaChapterCacheTracker
+import io.legado.app.help.book.isImage
 import io.legado.app.help.config.AppConfig
+import io.legado.app.help.translate.BookTitleTranslator
+import io.legado.app.help.translate.TranslateConfig
 import io.legado.app.model.ReadBook
 import io.legado.app.ui.book.bookmark.AllBookmarkFilter
 import io.legado.app.ui.book.bookmark.BookmarkNoteFilter
 import io.legado.app.ui.book.bookmark.buildAllBookmarkCollection
+import io.legado.app.ui.book.explore.ExploreToolbarButton
 import io.legado.app.ui.book.toc.TocViewModel
 import io.legado.app.ui.design.components.compose.LocalNgPaneBounds
 import io.legado.app.ui.design.components.compose.NgBottomDrawerSurface
@@ -951,22 +960,61 @@ private fun ReadCatalogPanel(
             changeQuery("")
         }
     }
+    val context = LocalContext.current
+    val imageProgressStates by MangaChapterCacheTracker.states.collectAsState()
+    var translateCatalog by remember(book.bookUrl) {
+        mutableStateOf(TranslateConfig.isBookCatalogTranslateEnabled(book.bookUrl))
+    }
+    val translatedTitles = remember(book.bookUrl) { mutableStateMapOf<String, String>() }
+    val toggleCatalogTranslate: () -> Unit = {
+        val next = !translateCatalog
+        translateCatalog = next
+        TranslateConfig.setBookCatalogTranslateEnabled(book.bookUrl, next)
+        context.toastOnUi(if (next) "已开启目录翻译" else "已关闭目录翻译")
+    }
+    LaunchedEffect(book.bookUrl, dataVersion) {
+        if (book.isImage) {
+            val allChapters = withContext(Dispatchers.IO) {
+                appDb.bookChapterDao.getChapterList(book.bookUrl)
+            }
+            MangaChapterCacheTracker.syncBookChapters(book, allChapters)
+        }
+    }
     val catalogHeaderAction: @Composable () -> Unit = {
+        val translateAction: @Composable () -> Unit = {
+            ExploreToolbarButton(
+                iconRes = R.drawable.ic_translate,
+                description = stringResource(R.string.explore_auto_translate),
+                tint = if (translateCatalog) accentColor else contentColor,
+                onClick = toggleCatalogTranslate,
+                modifier = Modifier.background(
+                    if (translateCatalog) accentColor.copy(alpha = 0.14f) else Color.Transparent,
+                    RoundedCornerShape(10.dp),
+                ),
+            )
+        }
         if (onReverseToc != null && selectedTab == CatalogTab.Chapters) {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                translateAction()
                 CatalogRefreshButton(refreshing, contentColor, refreshCatalog, enabled = chapterActionsEnabled)
                 CatalogLocateButton(chapterActionsEnabled && chapterCount > 0, contentColor, locateCurrentChapter)
                 CatalogToolsButton(toolsActive, contentColor, accentColor, onToolsAction)
             }
         } else if (directChapterControls) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp),
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp),
                 verticalAlignment = Alignment.CenterVertically) {
+                translateAction()
                 if (readingBottom) {
                     CatalogSearchButton(toolsActive, contentColor, accentColor, onToolsAction)
                 }
                 CatalogRefreshButton(refreshing, accentColor, refreshCatalog)
             }
-        } else CatalogToolsButton(toolsActive, contentColor, accentColor, onToolsAction)
+        } else {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                translateAction()
+                CatalogToolsButton(toolsActive, contentColor, accentColor, onToolsAction)
+            }
+        }
     }
     val chapterToolsPanel: @Composable () -> Unit = {
         CatalogToolsPanel(query, stringResource(R.string.read_catalog_search_chapters), changeQuery,
@@ -1113,6 +1161,10 @@ private fun ReadCatalogPanel(
                                         onChapterClick = selectChapter,
                                         compact = true,
                                         volumeChildIndices = volumeChildIndices,
+                                        isImageBook = book.isImage,
+                                        imageProgressStates = imageProgressStates,
+                                        translateCatalog = translateCatalog,
+                                        translatedTitles = translatedTitles,
                                     )
                                 }
                             } else {
@@ -1330,6 +1382,10 @@ private fun ReadCatalogPanel(
                             onChapterCountChanged = { visibleChapterCount = it },
                             onChapterClick = selectChapter,
                             dense = denseList,
+                            isImageBook = book.isImage,
+                            imageProgressStates = imageProgressStates,
+                            translateCatalog = translateCatalog,
+                            translatedTitles = translatedTitles,
                         )
                     } else {
                         CatalogBookmarkList(
@@ -1742,6 +1798,10 @@ private fun CatalogChapterList(
     compact: Boolean = false,
     dense: Boolean = false,
     volumeChildIndices: Set<Int> = emptySet(),
+    isImageBook: Boolean = false,
+    imageProgressStates: Map<String, ChapterImageCacheProgress> = emptyMap(),
+    translateCatalog: Boolean = false,
+    translatedTitles: androidx.compose.runtime.snapshots.SnapshotStateMap<String, String>? = null,
 ) {
     var queriedItemCount by remember(query, descending) { mutableStateOf(0) }
     val itemCount = visibleOutline?.size ?: queriedItemCount
@@ -1872,6 +1932,27 @@ private fun CatalogChapterList(
                     else if (compact) CompactCatalogPlaceholder(mutedColor)
                     else CatalogChapterPlaceholder(mutedColor)
                 } else {
+                    val resolvedTitle = if (translateCatalog) {
+                        val raw = item.displayTitle
+                        val cachedTr = translatedTitles?.get(raw) ?: BookTitleTranslator.getCached(raw)
+                        if (cachedTr != null) {
+                            cachedTr
+                        } else {
+                            if (translatedTitles != null && BookTitleTranslator.needsTranslation(raw)) {
+                                LaunchedEffect(raw, translateCatalog) {
+                                    if (!translateCatalog || raw in translatedTitles) return@LaunchedEffect
+                                    val tr = withContext(Dispatchers.IO) { BookTitleTranslator.translateText(raw) }
+                                    if (!tr.isNullOrBlank()) {
+                                        translatedTitles[raw] = tr
+                                    }
+                                }
+                            }
+                            raw
+                        }
+                    } else item.displayTitle
+                    val imgProgress = if (isImageBook && !item.chapter.isVolume) {
+                        imageProgressStates[MangaChapterCacheTracker.key(bookUrl, item.chapter.index)]
+                    } else null
                     val cached = isLocalBook || item.chapter.isVolume ||
                         cachedChapterFiles.contains(item.chapter.getFileName())
                     val volumeExpanded = if (showUncachedWordCount && item.chapter.isVolume && query.isBlank()) {
@@ -1883,9 +1964,10 @@ private fun CatalogChapterList(
                     }
                     if (dense) DenseCatalogChapterRow(
                         chapter = item.chapter,
-                        displayTitle = item.displayTitle,
+                        displayTitle = resolvedTitle,
                         current = item.chapter.index == currentChapterIndex,
                         cached = cached,
+                        imageProgress = imgProgress,
                         showCacheState = showCacheState,
                         showWordCount = showWordCount,
                         mutedColor = mutedColor,
@@ -1894,10 +1976,11 @@ private fun CatalogChapterList(
                         onClick = click,
                     ) else if (compact) CompactCatalogChapterRow(
                         chapter = item.chapter,
-                        displayTitle = item.displayTitle,
+                        displayTitle = resolvedTitle,
                         current = item.chapter.index == currentChapterIndex,
                         isVolumeChild = item.chapter.index in volumeChildIndices,
                         cached = cached,
+                        imageProgress = imgProgress,
                         showCacheState = showCacheState,
                         showWordCount = showWordCount,
                         contentColor = contentColor,
@@ -1906,9 +1989,10 @@ private fun CatalogChapterList(
                         onClick = click,
                     ) else NgCatalogChapterRow(
                         chapter = item.chapter,
-                        displayTitle = item.displayTitle,
+                        displayTitle = resolvedTitle,
                         current = item.chapter.index == currentChapterIndex,
                         cached = cached,
+                        imageProgress = imgProgress,
                         showCacheState = showCacheState,
                         showWordCount = showWordCount,
                         contentColor = contentColor,
@@ -1936,6 +2020,7 @@ internal fun NgCatalogChapterRow(
     onClick: () -> Unit,
     onLongClick: (() -> Unit)? = null,
     volumeExpanded: Boolean? = null,
+    imageProgress: ChapterImageCacheProgress? = null,
 ) {
     val cardColor = catalogCardColor()
     val cardShape = RoundedCornerShape(NgTheme.shapes.largeDp.dp)
@@ -1948,6 +2033,8 @@ internal fun NgCatalogChapterRow(
     }
     val chapterTag = if (chapter.isVolume) chapter.tag?.takeIf(String::isNotBlank) else metadata.description
     val currentChapterIndicatorColor = Color(NgTheme.colors.primary)
+    val progressFraction = imageProgress?.visualFraction ?: 0f
+    val greenColor = Color(0xFF22C55E)
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1955,6 +2042,19 @@ internal fun NgCatalogChapterRow(
             .clip(cardShape)
             .background(cardColor)
             .drawBehind {
+                if (progressFraction > 0f) {
+                    val fillW = size.width * progressFraction.coerceIn(0f, 1f)
+                    drawRect(
+                        color = greenColor.copy(alpha = if (imageProgress?.isCompleted == true) 0.24f else 0.18f),
+                        size = Size(width = fillW, height = size.height),
+                    )
+                    val barH = 2.5.dp.toPx()
+                    drawRect(
+                        color = greenColor,
+                        topLeft = Offset(0f, size.height - barH),
+                        size = Size(width = fillW, height = barH),
+                    )
+                }
                 if (current) {
                     drawRect(
                         color = currentChapterIndicatorColor,
@@ -2003,6 +2103,16 @@ internal fun NgCatalogChapterRow(
                     modifier = Modifier.size(20.dp), tint = mutedColor,
                 )
             } else {
+                if (imageProgress != null && imageProgress.total > 0 && progressFraction > 0f) {
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = if (imageProgress.isCompleted) "已缓存" else "${imageProgress.cached}/${imageProgress.total}",
+                        color = Color(0xFF16A34A),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                    )
+                }
                 if (wordCount != null) {
                     Spacer(Modifier.width(8.dp))
                     Text(
@@ -2049,12 +2159,30 @@ internal fun DenseCatalogChapterRow(
     accentColor: Color,
     volumeExpanded: Boolean?,
     onClick: () -> Unit,
+    imageProgress: ChapterImageCacheProgress? = null,
 ) {
     val metadata = catalogChapterMetadata(chapter.tag, chapter.wordCount, cached)
     val wordCount = metadata.wordCount.takeIf { showWordCount && !chapter.isVolume }
     val chapterTag = if (chapter.isVolume) chapter.tag?.takeIf(String::isNotBlank) else metadata.description
+    val progressFraction = imageProgress?.visualFraction ?: 0f
+    val greenColor = Color(0xFF22C55E)
     Column(
         modifier = Modifier.fillMaxWidth()
+            .drawBehind {
+                if (progressFraction > 0f) {
+                    val fillW = size.width * progressFraction.coerceIn(0f, 1f)
+                    drawRect(
+                        color = greenColor.copy(alpha = if (imageProgress?.isCompleted == true) 0.22f else 0.16f),
+                        size = Size(width = fillW, height = size.height),
+                    )
+                    val barH = 2.5.dp.toPx()
+                    drawRect(
+                        color = greenColor,
+                        topLeft = Offset(0f, size.height - barH),
+                        size = Size(width = fillW, height = barH),
+                    )
+                }
+            }
             .clickable(onClick = onClick)
             .semantics { selected = current },
     ) {
@@ -2090,7 +2218,17 @@ internal fun DenseCatalogChapterRow(
                         modifier = Modifier.size(20.dp), tint = mutedColor,
                     )
                 } else {
-                    if (wordCount != null) {
+                    if (imageProgress != null && imageProgress.total > 0 && progressFraction > 0f) {
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = if (imageProgress.isCompleted) "已缓存" else "${imageProgress.cached}/${imageProgress.total}",
+                        color = Color(0xFF16A34A),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                    )
+                }
+                if (wordCount != null) {
                         Spacer(Modifier.width(8.dp))
                         Text(wordCount, color = mutedColor, fontSize = 11.sp,
                             fontWeight = FontWeight.Medium, maxLines = 1)
@@ -2135,14 +2273,30 @@ private fun CompactCatalogChapterRow(
     mutedColor: Color,
     volumeExpanded: Boolean?,
     onClick: () -> Unit,
+    imageProgress: ChapterImageCacheProgress? = null,
 ) {
     val activeColor = Color(NgTheme.colors.primary)
     val wordCount = if (showWordCount && !chapter.isVolume) {
         catalogChapterMetadata(chapter.tag, chapter.wordCount, cached).wordCount
     } else null
+    val progressFraction = imageProgress?.visualFraction ?: 0f
+    val greenColor = Color(0xFF22C55E)
     Row(
         modifier = Modifier.fillMaxWidth().height(52.dp)
             .drawBehind {
+                if (progressFraction > 0f) {
+                    val fillW = size.width * progressFraction.coerceIn(0f, 1f)
+                    drawRect(
+                        color = greenColor.copy(alpha = if (imageProgress?.isCompleted == true) 0.22f else 0.16f),
+                        size = Size(width = fillW, height = size.height),
+                    )
+                    val barH = 2.5.dp.toPx()
+                    drawRect(
+                        color = greenColor,
+                        topLeft = Offset(0f, size.height - barH),
+                        size = Size(width = fillW, height = barH),
+                    )
+                }
                 if (current) drawRect(activeColor, size = Size(3.dp.toPx(), size.height))
             }
             .clickable(onClick = onClick)

@@ -66,8 +66,9 @@ private val primaryItems = listOf(
     ),
     MyMenuItem(
         MyMenuAction.RSS_SOURCE,
-        R.string.rss_source_manage,
-        iconRes = R.drawable.ic_bottom_explore_e,
+        R.string.my_rss_manage,
+        R.string.my_rss_manage_desc,
+        R.drawable.ic_bottom_explore_e,
     ),
     MyMenuItem(
         MyMenuAction.RULE,
@@ -103,12 +104,6 @@ private val primaryItems = listOf(
 
 private val settingsItems = listOf(
     MyMenuItem(
-        MyMenuAction.BACKUP,
-        R.string.backup_restore,
-        R.string.web_dav_set_import_old,
-        R.drawable.ic_cfg_backup,
-    ),
-    MyMenuItem(
         MyMenuAction.APPEARANCE,
         R.string.appearance_setting,
         R.string.appearance_setting_summary,
@@ -143,6 +138,12 @@ private val settingsItems = listOf(
         R.string.advanced_setting,
         R.string.advanced_setting_summary,
         R.drawable.ic_cfg_other,
+    ),
+    MyMenuItem(
+        MyMenuAction.BACKUP,
+        R.string.backup_restore,
+        R.string.web_dav_set_import_old,
+        R.drawable.ic_cfg_backup,
     ),
 )
 

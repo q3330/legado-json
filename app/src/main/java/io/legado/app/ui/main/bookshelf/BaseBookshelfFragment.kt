@@ -25,6 +25,7 @@ import io.legado.app.ui.about.NetworkLogDialog
 import io.legado.app.ui.book.group.GroupManageDialog
 import io.legado.app.ui.book.import.local.ImportBookActivity
 import io.legado.app.ui.book.import.remote.RemoteBookActivity
+import io.legado.app.ui.book.manage.BookshelfManageActivity
 import io.legado.app.ui.book.search.SearchActivity
 import io.legado.app.ui.config.AiChatActivity
 import io.legado.app.utils.CreateFileContract
@@ -127,6 +128,9 @@ abstract class BaseBookshelfFragment(layoutId: Int) : VMBaseFragment<BookshelfVi
             }
             R.id.menu_bookshelf_layout -> configBookshelf()
             R.id.menu_bookshelf_settings -> BookshelfLayoutDialog.showSettings(childFragmentManager)
+            R.id.menu_bookshelf_manage -> startActivity<BookshelfManageActivity> {
+                putExtra("groupId", groupId)
+            }
             R.id.menu_group_manage -> showDialogFragment<GroupManageDialog>()
             R.id.menu_add_local -> startActivity<ImportBookActivity>()
             R.id.menu_add_url -> showAddBookByUrlAlert()

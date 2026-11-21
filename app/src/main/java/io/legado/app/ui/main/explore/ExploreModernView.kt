@@ -375,30 +375,32 @@ internal fun ExploreSourcePickerDialog(
                                     )
                                     Spacer(Modifier.width(8.dp))
                                 }
-                                Box(
-                                    modifier = Modifier
-                                        .size(30.dp)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .clickable { menuExpanded = true },
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    Icon(
-                                        painter = painterResource(R.drawable.ic_more),
-                                        contentDescription = stringResource(R.string.more),
-                                        modifier = Modifier.size(16.dp),
-                                        tint = colorResource(R.color.secondaryText),
+                                Box {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(30.dp)
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .clickable { menuExpanded = true },
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Icon(
+                                            painter = painterResource(R.drawable.ic_more),
+                                            contentDescription = stringResource(R.string.more),
+                                            modifier = Modifier.size(16.dp),
+                                            tint = colorResource(R.color.secondaryText),
+                                        )
+                                    }
+                                    ExploreSourceMenu(
+                                        source = source,
+                                        expanded = menuExpanded,
+                                        onDismiss = { menuExpanded = false },
+                                        onAction = { actionId ->
+                                            menuExpanded = false
+                                            onSourceAction(source, actionId)
+                                        },
                                     )
                                 }
                             }
-                            ExploreSourceMenu(
-                                source = source,
-                                expanded = menuExpanded,
-                                onDismiss = { menuExpanded = false },
-                                onAction = { actionId ->
-                                    menuExpanded = false
-                                    onSourceAction(source, actionId)
-                                },
-                            )
                         }
                     }
                 }

@@ -80,6 +80,7 @@ internal data class ServiceConfigScreenState(
     val mcpServiceSummary: String = "",
     val mcpPort: Int = SERVICE_PORT_MIN,
     val mcpPortSummary: String = "",
+    val mcpLocalOnly: Boolean = false,
 )
 
 internal enum class ServiceConfigDialog {
@@ -104,6 +105,7 @@ internal fun ServiceConfigScreen(
     onMcpServiceLongClick: () -> Unit,
     onMcpPortChanged: (Int) -> Unit,
     onMcpPortChangeFinished: () -> Unit,
+    onMcpLocalOnlyChanged: (Boolean) -> Unit = {},
 ) {
     var expandedPort by rememberSaveable { mutableStateOf<String?>(null) }
     Column(
@@ -174,6 +176,15 @@ internal fun ServiceConfigScreen(
                     },
                 )
             }
+            NgSettingsItem(
+                title = stringResource(R.string.mcp_local_only),
+                summary = stringResource(R.string.mcp_local_only_summary),
+                summaryMaxLines = 2,
+                trailing = NgSettingsTrailing.SWITCH,
+                checked = state.mcpLocalOnly,
+                onCheckedChange = onMcpLocalOnlyChanged,
+                onClick = { onMcpLocalOnlyChanged(!state.mcpLocalOnly) },
+            )
         }
     }
 }

@@ -114,10 +114,12 @@ object TranslateConfig {
     private const val PREF_NAME = "translate_config"
     private const val KEY_ENABLED = "enabled"
     private const val KEY_TRANSLATE_INTRO = "translate_intro"
+    private const val KEY_TRANSLATE_CATALOG = "translate_catalog"
     private const val KEY_TRANSLATE_CONTENT_DEFAULT = "translate_content_default"
     private const val KEY_TARGET_LANG = "target_lang"
     private const val KEY_ENGINES_JSON = "engines_json"
     private const val KEY_BOOK_TRANSLATE_PREFIX = "book_tr_"
+    private const val KEY_BOOK_CATALOG_TRANSLATE_PREFIX = "book_tr_catalog_"
     private const val KEY_BOOK_CONTENT_TRANSLATE_PREFIX = "book_tr_content_"
 
     val supportedTargetLangs = listOf(
@@ -150,6 +152,13 @@ object TranslateConfig {
         get() = prefs.getBoolean(KEY_TRANSLATE_INTRO, true)
         set(value) {
             prefs.edit { putBoolean(KEY_TRANSLATE_INTRO, value) }
+            notifyChanged()
+        }
+
+    var translateCatalog: Boolean
+        get() = prefs.getBoolean(KEY_TRANSLATE_CATALOG, false)
+        set(value) {
+            prefs.edit { putBoolean(KEY_TRANSLATE_CATALOG, value) }
             notifyChanged()
         }
 
@@ -279,6 +288,18 @@ object TranslateConfig {
 
     fun setBookTranslateEnabled(bookUrl: String, value: Boolean) {
         val key = KEY_BOOK_TRANSLATE_PREFIX + bookKeyHash(bookUrl)
+        prefs.edit { putBoolean(key, value) }
+        notifyChanged()
+    }
+
+    fun isBookCatalogTranslateEnabled(bookUrl: String?): Boolean {
+        if (bookUrl.isNullOrBlank()) return translateCatalog
+        val key = KEY_BOOK_CATALOG_TRANSLATE_PREFIX + bookKeyHash(bookUrl)
+        return if (prefs.contains(key)) prefs.getBoolean(key, translateCatalog) else translateCatalog
+    }
+
+    fun setBookCatalogTranslateEnabled(bookUrl: String, value: Boolean) {
+        val key = KEY_BOOK_CATALOG_TRANSLATE_PREFIX + bookKeyHash(bookUrl)
         prefs.edit { putBoolean(key, value) }
         notifyChanged()
     }

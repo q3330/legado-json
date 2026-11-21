@@ -421,11 +421,12 @@ internal fun MangaImage(page: MangaPage, ui: MangaReaderState, viewportHeight: a
 
 /** 只替代 RecyclerViewPreloader 的视口消费端；下载/缓存仍走 BookCover。 */
 internal class MangaImagePreloader(
-    private val context: android.content.Context,
+    context: android.content.Context,
     private val imageRatios: MangaImageRatioCache? = null,
     private val scope: CoroutineScope? = null,
     private val sourceOrigin: String? = null,
 ) {
+    private val appContext = context.applicationContext
     private val targets = linkedMapOf<String, Target<File?>>()
     private val metadataTargets = linkedMapOf<String, Target<File?>>()
     fun update(pages: List<BaseMangaPage>, position: Int, count: Int, forward: Boolean) {
@@ -436,7 +437,7 @@ internal class MangaImagePreloader(
             val metadataIterator = metadataTargets.iterator()
             while (metadataIterator.hasNext()) {
                 val entry = metadataIterator.next()
-                if (entry.key !in nearby) { Glide.with(context).clear(entry.value); metadataIterator.remove() }
+                if (entry.key !in nearby) { runCatching { Glide.with(appContext).clear(entry.value) }; metadataIterator.remove() }
             }
             for (url in nearby) if (url !in metadataTargets) {
                 metadataTargets[url] = request(url).onlyRetrieveFromCache(true).preload()
@@ -455,14 +456,14 @@ internal class MangaImagePreloader(
         val iterator = targets.iterator()
         while (iterator.hasNext()) {
             val entry = iterator.next()
-            if (entry.key !in urls) { Glide.with(context).clear(entry.value); iterator.remove() }
+            if (entry.key !in urls) { runCatching { Glide.with(appContext).clear(entry.value) }; iterator.remove() }
         }
         for (url in urls) if (url !in targets) {
             targets[url] = request(url).preload()
         }
     }
     private fun request(url: String): RequestBuilder<File?> {
-        val request = BookCover.preloadManga(context, url, sourceOrigin = sourceOrigin ?: ReadManga.book?.origin)
+        val request = BookCover.preloadManga(appContext, url, sourceOrigin = sourceOrigin ?: ReadManga.book?.origin)
         if (imageRatios == null || scope == null) return request
         return request.addListener(object : RequestListener<File?> {
             override fun onLoadFailed(e: GlideException?, model: Any?, target: Target<File?>, isFirstResource: Boolean) = false
@@ -479,7 +480,7 @@ internal class MangaImagePreloader(
         })
     }
     fun clear() {
-        (targets.values + metadataTargets.values).forEach { Glide.with(context).clear(it) }
+        (targets.values + metadataTargets.values).forEach { runCatching { Glide.with(appContext).clear(it) } }
         targets.clear(); metadataTargets.clear()
     }
 }

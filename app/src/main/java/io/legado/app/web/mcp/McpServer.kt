@@ -286,11 +286,20 @@ object McpServer {
             ),
             tool(
                 name = "book_source_save",
-                description = "Save or overwrite one Legado book source.",
+                description = "Save or overwrite one Legado book source. Set patch=true to merge provided fields onto an existing source.",
                 properties = mapOf(
                     "source" to mapOf(
                         "type" to "object",
-                        "description" to "BookSource JSON object"
+                        "description" to "BookSource JSON object (full source or partial patch when patch=true)"
+                    ),
+                    "patch" to mapOf(
+                        "type" to "boolean",
+                        "default" to false,
+                        "description" to "When true and bookSourceUrl exists, merge onto existing BookSource while preserving omitted fields"
+                    ),
+                    "ensure_ai_group" to mapOf(
+                        "type" to "boolean",
+                        "description" to "Ensure 'AI制作书源' group is attached to bookSourceGroup (defaults to true for newly created sources)"
                     )
                 ),
                 required = listOf("source")
@@ -323,10 +332,14 @@ object McpServer {
             ),
             tool(
                 name = "book_source_debug",
-                description = "Debug a Legado book source and return collected debug logs.",
+                description = "Debug a Legado book source and return collected debug logs. Supports debugging an unsaved draft via source_override without writing to database.",
                 properties = mapOf(
-                    "tag" to stringSchema("BookSource.bookSourceUrl"),
-                    "key" to stringSchema("Keyword or URL used by Legado debug"),
+                    "tag" to stringSchema("Optional saved BookSource.bookSourceUrl (required unless source_override provides bookSourceUrl)"),
+                    "key" to stringSchema("Keyword, URL, title::url, ++tocUrl, or --contentUrl used by Legado debug"),
+                    "source_override" to mapOf(
+                        "type" to "object",
+                        "description" to "Optional full or partial BookSource JSON object for draft debugging without saving to database."
+                    ),
                     "main_js_override" to stringSchema("Optional mainJs for this debug request only; never saved to the source."),
                     "js_lib_override" to stringSchema("Optional jsLib for this debug request only; never saved to the source."),
                     "mode" to mapOf(
@@ -339,7 +352,7 @@ object McpServer {
                         "default" to 30
                     )
                 ),
-                required = listOf("tag", "key")
+                required = listOf("key")
             ),
             tool(
                 name = "book_search",
@@ -575,7 +588,8 @@ object McpServer {
                 properties = emptyMap()
             )
         ) + BookshelfMcpTools.tools() + SettingsMcpTools.tools() + AgentMemoryMcpTools.tools() +
-            ExploreMcpTools.tools() + RssSourceMcpTools.tools() + RssContentMcpTools.tools()
+            ExploreMcpTools.tools() + RssSourceMcpTools.tools() + RssContentMcpTools.tools() +
+            BookSourceCreatorMcpTools.tools()
     }
 
     private fun tool(
@@ -684,13 +698,7 @@ object McpServer {
                 )
             }
             "book_source_explore_kinds_get" -> getBookSourceExploreKinds(arguments)
-            "book_source_save" -> {
-                val source = arguments.get("source") ?: throw IllegalArgumentException("source is required")
-                normalizeReturnData(
-                    "/saveBookSource",
-                    BookSourceController.saveSource(GSON.toJson(source))
-                )
-            }
+            "book_source_save" -> saveBookSource(arguments)
             "book_source_delete" -> deleteBookSources(arguments)
             "book_source_set_enabled" -> setBookSourcesEnabled(arguments)
             "book_source_debug" -> runBookSourceDebug(arguments)
@@ -713,6 +721,7 @@ object McpServer {
                 ?: ExploreMcpTools.call(name, arguments)
                 ?: RssSourceMcpTools.call(name, arguments)
                 ?: RssContentMcpTools.call(name, arguments)
+                ?: BookSourceCreatorMcpTools.call(name, arguments)
                 ?: throw IllegalArgumentException("Unknown tool: $name")
         }
         val text = GSON.toJson(result)
@@ -830,11 +839,61 @@ object McpServer {
         }
     }
 
+    private const val AI_CREATED_BOOK_SOURCE_GROUP = "AI制作书源"
+
+    internal fun ensureAiCreatedBookSourceGroup(group: String?): String {
+        val parts = group.orEmpty()
+            .split(',', '，', ';', '；')
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+        if (parts.any { it.equals(AI_CREATED_BOOK_SOURCE_GROUP, ignoreCase = true) }) {
+            return parts.joinToString(",")
+        }
+        return (listOf(AI_CREATED_BOOK_SOURCE_GROUP) + parts).joinToString(",")
+    }
+
+    private fun saveBookSource(arguments: JsonObject): Map<String, Any?> {
+        val rawSource = arguments.get("source") ?: throw IllegalArgumentException("source is required")
+        require(rawSource.isJsonObject) { "source must be an object" }
+        val sourceObj = rawSource.asJsonObject.deepCopy()
+        val patch = arguments.get("patch").asBooleanOrNull() ?: false
+        val url = sourceObj.get("bookSourceUrl").asStringOrNull()?.trim().orEmpty()
+        val existing = url.takeIf { it.isNotBlank() }?.let(appDb.bookSourceDao::getBookSource)
+        val ensureAiGroup = arguments.get("ensure_ai_group").asBooleanOrNull() ?: (existing == null)
+        val payloadJson = if (patch && existing != null) {
+            val merged = BookSourceCreatorMcpTools.mergeBookSource(existing, sourceObj)
+            if (!sourceObj.has("customOrder")) {
+                merged.customOrder = existing.customOrder
+            }
+            if (ensureAiGroup) {
+                merged.bookSourceGroup = ensureAiCreatedBookSourceGroup(merged.bookSourceGroup)
+            }
+            GSON.toJson(merged)
+        } else {
+            if (ensureAiGroup) {
+                val currentGroup = sourceObj.get("bookSourceGroup").asStringOrNull()
+                sourceObj.addProperty("bookSourceGroup", ensureAiCreatedBookSourceGroup(currentGroup))
+            }
+            GSON.toJson(sourceObj)
+        }
+        return normalizeReturnData(
+            "/saveBookSource",
+            BookSourceController.saveSource(payloadJson)
+        )
+    }
+
     private fun runBookSourceDebug(arguments: JsonObject): Map<String, Any?> {
-        val tag = arguments.get("tag").asRequiredString("tag")
+        val overrideElement = arguments.get("source_override")
+        val overrideObj = overrideElement?.let {
+            require(it.isJsonObject) { "source_override must be an object" }
+            it.asJsonObject
+        }
+        val tag = arguments.get("tag").asStringOrNull()?.trim()?.takeIf { it.isNotBlank() }
+            ?: overrideObj?.get("bookSourceUrl").asStringOrNull()?.trim()?.takeIf { it.isNotBlank() }
+            ?: throw IllegalArgumentException("tag or source_override.bookSourceUrl is required")
         val key = arguments.get("key").asRequiredString("key")
         val mode = arguments.get("mode").asStringOrNull() ?: "auto"
-        val timeoutSeconds = arguments.get("timeout_seconds").asDoubleOrNull() ?: 30.0
+        val timeoutSeconds = (arguments.get("timeout_seconds").asDoubleOrNull() ?: 30.0).coerceIn(1.0, 120.0)
         val transformedKey = when (mode) {
             "auto", "search", "detail" -> key
             "explore" -> "explore::$key"
@@ -843,37 +902,56 @@ object McpServer {
             else -> key
         }
         val storedSource = appDb.bookSourceDao.getBookSource(tag)
-            ?: return toolResult(
+        if (storedSource == null && overrideObj == null) {
+            return toolResult(
                 ok = false,
                 upstreamEndpoint = "native://bookSourceDebug",
                 normalizedData = null,
-                warnings = listOf("未找到源，请检查书源地址")
+                warnings = listOf("未找到源，请检查书源地址或传入 source_override")
             )
+        }
+        val baseSource = if (overrideObj != null) {
+            val base = storedSource ?: io.legado.app.data.entities.BookSource(
+                bookSourceUrl = tag,
+                bookSourceName = overrideObj.get("bookSourceName").asStringOrNull()?.takeIf { it.isNotBlank() } ?: tag
+            )
+            BookSourceCreatorMcpTools.mergeBookSource(base, overrideObj)
+        } else {
+            storedSource!!
+        }
         val mainOverride = arguments.get("main_js_override").asStringOrNull()
         val libraryOverride = arguments.get("js_lib_override").asStringOrNull()
         // Keep identity/login/preferences and the normal source class policy. The copy
         // is consumed only by Debug; editing either rule never mutates the stored row.
         val source = if (mainOverride != null || libraryOverride != null) {
-            val main = mainOverride ?: storedSource.mainJs
-            val library = libraryOverride ?: storedSource.jsLib
+            val main = mainOverride ?: baseSource.mainJs
+            val library = libraryOverride ?: baseSource.jsLib
             require((main?.length ?: 0).toLong() + (library?.length ?: 0) <= 2_000_000L &&
                 (main?.toByteArray(Charsets.UTF_8)?.size ?: 0).toLong() +
                 (library?.toByteArray(Charsets.UTF_8)?.size ?: 0) <= 2_000_000L) {
                 "Debug rule overrides exceed size limit"
             }
-            storedSource.copy(
+            baseSource.copy(
                 mainJs = main,
                 jsLib = library,
             )
-        } else storedSource
+        } else baseSource
         val logs = Collections.synchronizedList(mutableListOf<String>())
         val latch = CountDownLatch(1)
+        val failed = AtomicBoolean(false)
+        val truncated = AtomicBoolean(false)
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val callback = object : Debug.Callback {
             override fun printLog(state: Int, msg: String) {
-                if (state !in arrayOf(10, 20, 30, 40)) {
-                    logs.add(msg)
+                if (state !in arrayOf(10, 20, 30, 40)) synchronized(logs) {
+                    if (logs.size < 120) {
+                        logs.add(msg.take(4096))
+                    } else {
+                        truncated.set(true)
+                    }
+                    if (msg.length > 4096) truncated.set(true)
                 }
+                if (state == -1) failed.set(true)
                 if (state == -1 || state == 1000) {
                     latch.countDown()
                 }
@@ -897,15 +975,26 @@ object McpServer {
             scope.cancel()
         }
         val done = latch.count == 0L
+        val success = done && !failed.get()
+        val errorMessage = when {
+            !done -> "Debug timed out before completion"
+            failed.get() -> "Debug failed; see logs"
+            else -> null
+        }
         return toolResult(
-            ok = done,
+            ok = success,
             upstreamEndpoint = "native://bookSourceDebug",
             normalizedData = mapOf(
-                "logs" to logs,
+                "book_source_url" to source.bookSourceUrl,
+                "key" to transformedKey,
+                "logs" to synchronized(logs) { logs.toList() },
+                "logs_truncated" to truncated.get(),
                 "done" to done,
-                "error_message" to if (done) null else "Debug timed out before completion"
+                "failed" to failed.get(),
+                "success" to success,
+                "error_message" to errorMessage
             ),
-            warnings = if (done) emptyList() else listOf("Debug timed out before completion")
+            warnings = listOfNotNull(errorMessage)
         )
     }
 

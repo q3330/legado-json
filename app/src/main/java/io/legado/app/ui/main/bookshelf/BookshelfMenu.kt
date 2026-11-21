@@ -106,6 +106,13 @@ internal fun bookshelfMenuItems(
     )
     add(
         NgExpandableActionMenuItem(
+            R.id.menu_bookshelf_manage,
+            R.string.bookshelf_management,
+            R.drawable.ic_cfg_source
+        )
+    )
+    add(
+        NgExpandableActionMenuItem(
             itemId = R.id.menu_bookshelf_backup,
             titleRes = R.string.bookshelf_backup,
             iconRes = R.drawable.ic_backup,

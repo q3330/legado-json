@@ -60,6 +60,7 @@ object AiSkillRegistry {
     const val SKILL_CHAPTER_PURIFY = "chapter_purify"
     const val SKILL_BOOKSHELF_MANAGEMENT = "bookshelf_management"
     const val SKILL_CHARACTER_CARD_GENERATE = "character_card_generate"
+    const val SKILL_BOOK_SOURCE_CREATOR = "book_source_creator"
     const val SKILL_BOOK_SCAN = "book_scan"
     const val SKILL_BOOK_SCAN_FACTS = "book_scan_facts"
     const val SKILL_BOOK_SCAN_REPORT = "book_scan_report"
@@ -320,6 +321,11 @@ object AiSkillRegistry {
             ?.map { it.trim() }
             ?.filter { it.isNotBlank() }
             .orEmpty()
+        val packageHash = if (builtIn && !userModified) {
+            AiSkillPackageRegistry.systemPackage(id)?.contentHash
+        } else {
+            null
+        }
         return AiSkillDefinition(
             id = id,
             name = name,
@@ -334,7 +340,7 @@ object AiSkillRegistry {
             runtime = parseRuntimeDeclaration(metadata),
             presentation = parsePresentation(metadata),
             revision = metadata["version"]?.trim().orEmpty(),
-            contentHash = contentHashOverride ?: content.sha256()
+            contentHash = contentHashOverride ?: packageHash ?: content.sha256()
         )
     }
 

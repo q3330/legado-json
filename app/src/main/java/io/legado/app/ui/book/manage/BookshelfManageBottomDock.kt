@@ -15,6 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
@@ -25,6 +26,8 @@ import io.legado.app.help.book.menuCapabilities
 import io.legado.app.model.localBook.canExtractOriginalCover
 import io.legado.app.ui.design.components.compose.NgExpandableActionMenu
 import io.legado.app.ui.design.components.compose.NgExpandableActionMenuItem
+import io.legado.app.ui.design.components.compose.NgFileSelectionCheckboxVariant
+import io.legado.app.ui.design.components.compose.NgFileSelectionTriStateCheckbox
 import io.legado.app.ui.design.components.compose.NgFlatActionRail
 import io.legado.app.ui.design.components.compose.NgFlatActionRailItem
 import io.legado.app.ui.design.components.compose.NgFlatActionRailVariant
@@ -72,10 +75,11 @@ internal fun BookshelfManageDockAction.isApplicable(book: Book, hasCache: Boolea
 internal fun BookshelfManageBottomDock(
     selectedCount: Int,
     totalCount: Int,
+    selectAllState: ToggleableState,
     eligibleCounts: Map<BookshelfManageDockAction, Int>,
     modifier: Modifier = Modifier,
     onSelectAll: () -> Unit,
-    onInvertSelection: () -> Unit,
+    onClearSelection: () -> Unit,
     onAction: (BookshelfManageDockAction) -> Unit
 ) {
     val menuState = remember { NgPopupToggleState() }
@@ -91,33 +95,37 @@ internal fun BookshelfManageBottomDock(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(52.dp)
-                .padding(horizontal = 12.dp),
+                .padding(end = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            NgFileSelectionTriStateCheckbox(
+                state = selectAllState,
+                onClick = {
+                    if (selectAllState == ToggleableState.On) {
+                        onClearSelection()
+                    } else {
+                        onSelectAll()
+                    }
+                },
+                enabled = totalCount > 0,
+                variant = NgFileSelectionCheckboxVariant.COMPACT,
+            )
             Text(
                 text = stringResource(
                     R.string.bookshelf_manage_selected_count,
                     selectedCount
                 ),
-                modifier = Modifier.weight(1f),
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 4.dp),
                 color = Color(NgTheme.colors.onSurface),
                 fontSize = 12.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            Box(modifier = Modifier.width(220.dp)) {
+            Box(modifier = Modifier.width(84.dp)) {
                 NgFlatActionRail(
                     items = listOf(
-                        NgFlatActionRailItem(
-                            iconRes = R.drawable.ic_select_all,
-                            label = stringResource(R.string.select_all),
-                            enabled = totalCount > 0,
-                        ),
-                        NgFlatActionRailItem(
-                            iconRes = R.drawable.ic_refresh_black_24dp,
-                            label = stringResource(R.string.revert_selection),
-                            enabled = totalCount > 0,
-                        ),
                         NgFlatActionRailItem(
                             iconRes = R.drawable.ic_more_horiz,
                             label = stringResource(R.string.more),
@@ -125,13 +133,7 @@ internal fun BookshelfManageBottomDock(
                             emphasized = menuState.expanded,
                         ),
                     ),
-                    onItemClick = { index ->
-                        when (index) {
-                            0 -> onSelectAll()
-                            1 -> onInvertSelection()
-                            else -> menuState.onAnchorClick()
-                        }
-                    },
+                    onItemClick = { menuState.onAnchorClick() },
                     variant = NgFlatActionRailVariant.INLINE_DIVIDED,
                     trailingOverlay = {
                         NgExpandableActionMenu(
@@ -144,13 +146,13 @@ internal fun BookshelfManageBottomDock(
                                 menuState.close()
                                 onAction(item.toDockAction())
                             },
-                            width = 152.dp,
+                            width = 160.dp,
                             rowMinHeight = 36.dp,
                             bottomPointerHeight = 8.dp,
                             bottomPointerWidth = 18.dp,
-                            bottomPointerEndOffset = 65.dp,
+                            bottomPointerEndOffset = 34.dp,
                             menuContainerColor = colorResource(R.color.ng_surface_card),
-                            offset = DpOffset(x = (-67).dp, y = (-12).dp),
+                            offset = DpOffset(x = (-76).dp, y = (-12).dp),
                         )
                     },
                 )

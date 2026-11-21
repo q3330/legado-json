@@ -55,6 +55,7 @@ import io.legado.app.ui.book.character.BookCharacterActivity
 import io.legado.app.ui.book.audio.AudioPlayActivity
 import io.legado.app.ui.book.changesource.ChangeBookSourceDialog
 import io.legado.app.ui.book.changesource.ChangeBookSourceDrawer
+import io.legado.app.ui.book.explore.ExploreShowLayoutMode
 import io.legado.app.utils.SelectDirectoryContract
 import io.legado.app.ui.book.info.BookAiAssistantLauncher
 import io.legado.app.ui.book.info.BookInfoActivity
@@ -106,6 +107,7 @@ class BooksFragment() : BaseFragment(0),
     constructor(group: BookGroup) : this() {
         val bundle = Bundle()
         bundle.putLong("groupId", group.groupId)
+        bundle.putString("groupName", group.groupName)
         bundle.putInt("bookSort", group.getRealBookSort())
         bundle.putBoolean("enableRefresh", group.enableRefresh)
         bundle.putBoolean("onlyUpdateRead", group.onlyUpdateRead)
@@ -113,8 +115,9 @@ class BooksFragment() : BaseFragment(0),
     }
 
     private val activityViewModel by activityViewModels<MainViewModel>()
-    private val layoutMode by lazy { AppConfig.activeBookshelfLayoutMode }
+    private var layoutMode by mutableStateOf(AppConfig.activeBookshelfLayoutMode)
     private var layoutProfile by mutableStateOf(AppConfig.getBookshelfLayoutProfile(layoutMode))
+    private var groupName by mutableStateOf("")
     private var showReadingProgress by mutableStateOf(AppConfig.bookshelfShowReadingProgress)
     private var highlightUnread by mutableStateOf(AppConfig.bookshelfHighlightUnread)
     private var isRefreshing by mutableStateOf(false)
@@ -192,6 +195,7 @@ class BooksFragment() : BaseFragment(0),
         activityViewModel.isTocRefreshing.observe(viewLifecycleOwner) { isRefreshing = it }
         arguments?.let {
             groupId = it.getLong("groupId", -1)
+            groupName = it.getString("groupName").orEmpty()
             bookSort = it.getInt("bookSort", 0)
             refreshAllowed = it.getBoolean("enableRefresh", true)
             onlyUpdateRead = it.getBoolean("onlyUpdateRead", false)
@@ -200,6 +204,7 @@ class BooksFragment() : BaseFragment(0),
             NgAppTheme {
                 val bottomInset = with(LocalDensity.current) { bottomInsetPx.toDp() }
                 BookshelfBooksScreen(
+                    groupName = groupName,
                     books = bookItems,
                     layoutMode = layoutMode,
                     columns = layoutProfile.columns,
@@ -222,6 +227,7 @@ class BooksFragment() : BaseFragment(0),
                     onRefresh = {
                         activityViewModel.upToc(bookItems, onlyUpdateRead)
                     },
+                    onLayoutModeChange = ::updateLayoutMode,
                     onOpenBook = ::open,
                     onOpenBookInfo = ::openBookInfo,
                     onOpenBookActions = ::openBookActions,
@@ -240,17 +246,37 @@ class BooksFragment() : BaseFragment(0),
         val sortChanged = bookSort != sort
         arguments?.apply {
             putLong("groupId", group.groupId)
+            putString("groupName", group.groupName)
             putInt("bookSort", sort)
             putBoolean("enableRefresh", group.enableRefresh)
             putBoolean("onlyUpdateRead", group.onlyUpdateRead)
         }
         groupId = group.groupId
+        groupName = group.groupName
         bookSort = sort
         refreshAllowed = group.enableRefresh
         onlyUpdateRead = group.onlyUpdateRead
         if (view != null && sortChanged) {
             view?.post { upRecyclerData() }
         }
+    }
+
+    private fun updateLayoutMode(mode: ExploreShowLayoutMode) {
+        if (mode == ExploreShowLayoutMode.LIST) {
+            AppConfig.selectBookshelfLayoutMode(BookshelfLayoutMode.LIST)
+            layoutMode = BookshelfLayoutMode.LIST
+            layoutProfile = AppConfig.getBookshelfLayoutProfile(BookshelfLayoutMode.LIST)
+        } else {
+            AppConfig.selectBookshelfLayoutMode(BookshelfLayoutMode.GRID)
+            val currentGrid = AppConfig.getBookshelfLayoutProfile(BookshelfLayoutMode.GRID)
+            AppConfig.setBookshelfLayoutProfile(
+                BookshelfLayoutMode.GRID,
+                currentGrid.copy(columns = mode.columns),
+            )
+            layoutMode = BookshelfLayoutMode.GRID
+            layoutProfile = AppConfig.getBookshelfLayoutProfile(BookshelfLayoutMode.GRID)
+        }
+        postEvent(EventBus.BOOKSHELF_REFRESH, "")
     }
 
     /**
@@ -597,6 +623,7 @@ class BooksFragment() : BaseFragment(0),
             }
         }
         observeEvent<String>(EventBus.BOOKSHELF_REFRESH) {
+            layoutMode = AppConfig.activeBookshelfLayoutMode
             layoutProfile = AppConfig.getBookshelfLayoutProfile(layoutMode)
             showReadingProgress = AppConfig.bookshelfShowReadingProgress
             highlightUnread = AppConfig.bookshelfHighlightUnread

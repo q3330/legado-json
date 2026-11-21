@@ -227,6 +227,8 @@ class BookInfoActivity :
     private var otherWorksGroupCounts = emptyMap<String, Int>()
     private var otherWorksGroupPrimaryBookUrls = emptyMap<String, String>()
     private val expandedOtherWorksKeys = linkedSetOf<String>()
+    private val otherWorksTranslatedNames = hashMapOf<String, String>()
+    private var otherWorksTranslateJob: Job? = null
     private val book get() = viewModel.getBook(false)
 
     override val binding by viewBinding(ComposeActivityBinding::inflate)
@@ -354,11 +356,14 @@ class BookInfoActivity :
                 uiState = uiState.copy(bookTranslateEnabled = next)
                 toastOnUi(if (next) "已开启自动翻译" else "已关闭自动翻译")
                 if (!next) {
+                    otherWorksTranslateJob?.cancel()
                     uiState = uiState.copy(displayBookName = null, originalNameText = null)
                     showBookIntro(current)
+                    updateOtherWorksUiItems()
                 } else {
                     applyBookTitleTranslation(current)
                     showBookIntro(current)
+                    updateOtherWorksUiItems()
                 }
             }
             is BookInfoUiEvent.Menu -> handleBookInfoMenuAction(event.action)
@@ -838,16 +843,64 @@ class BookInfoActivity :
     }
 
     private fun updateOtherWorksUiItems() {
+        val items = buildOtherWorksItems()
+        val translateOn = uiState.bookTranslateEnabled
         uiState = uiState.copy(
-            otherWorks = buildOtherWorksItems().map { otherBook ->
+            otherWorks = items.map { otherBook ->
+                val translated = if (translateOn) {
+                    otherWorksTranslatedNames[otherBook.name] ?: BookTitleTranslator.getCached(otherBook.name)
+                } else {
+                    null
+                }
                 BookInfoOtherWorkUiItem(
                     book = otherBook,
                     inBookshelf = viewModel.isInBookShelf(otherBook),
                     originCount = otherWorksGroupCount(otherBook),
                     canExpand = canExpandOtherWorks(otherBook),
+                    displayTitle = translated,
                 )
             },
         )
+        if (translateOn && items.isNotEmpty()) {
+            translateOtherWorksTitles(items)
+        }
+    }
+
+    private fun translateOtherWorksTitles(items: List<SearchBook>) {
+        val pending = items.map { it.name }.distinct().filter { name ->
+            name !in otherWorksTranslatedNames &&
+                BookTitleTranslator.getCached(name) == null &&
+                BookTitleTranslator.needsTranslation(name)
+        }
+        if (pending.isEmpty()) return
+        otherWorksTranslateJob?.cancel()
+        val targetBookUrl = viewModel.getBook(false)?.bookUrl ?: return
+        otherWorksTranslateJob = lifecycleScope.launch {
+            pending.chunked(20).forEach { batch ->
+                if (!uiState.bookTranslateEnabled || viewModel.getBook(false)?.bookUrl != targetBookUrl) {
+                    return@launch
+                }
+                val translatedMap = withContext(IO) {
+                    BookTitleTranslator.translateBatch(batch)
+                }
+                if (translatedMap.isNotEmpty()) {
+                    otherWorksTranslatedNames.putAll(translatedMap)
+                    if (uiState.bookTranslateEnabled && viewModel.getBook(false)?.bookUrl == targetBookUrl) {
+                        uiState = uiState.copy(
+                            otherWorks = uiState.otherWorks.map { item ->
+                                val tr = otherWorksTranslatedNames[item.book.name]
+                                    ?: BookTitleTranslator.getCached(item.book.name)
+                                if (tr != null && tr != item.displayTitle) {
+                                    item.copy(displayTitle = tr)
+                                } else {
+                                    item
+                                }
+                            },
+                        )
+                    }
+                }
+            }
+        }
     }
 
     private fun observeCharacterPreview(book: Book) {

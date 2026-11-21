@@ -133,6 +133,40 @@ class BookSourceDebugTimelineState {
         return phaseRawText(phase, phase.responses.isNotEmpty())
     }
 
+    data class DiagnosticSnapshot(
+        val hasLogs: Boolean,
+        val hasError: Boolean,
+        val failedPhaseTitle: String?,
+        val failedPhaseSummary: String?,
+        val failedPhaseDetail: String?,
+        val phaseStatusLines: List<String>,
+        val allLogsText: String,
+    )
+
+    fun diagnosticSnapshot(maxLogChars: Int = 8_000): DiagnosticSnapshot {
+        val phases = buildPhaseStates()
+        val failedPhase = phases.firstOrNull { it.status == StepStatus.Error }
+        val statusLines = phases.map { phase ->
+            val summary = phaseSummary(phase)
+            "- ${phase.title}：[${phase.status.label}] $summary"
+        }
+        val rawAllLogs = logs.joinToString("\n") { it.message }
+        val trimmedLogs = if (rawAllLogs.length > maxLogChars) {
+            rawAllLogs.takeLast(maxLogChars)
+        } else {
+            rawAllLogs
+        }
+        return DiagnosticSnapshot(
+            hasLogs = logs.isNotEmpty(),
+            hasError = failedPhase != null,
+            failedPhaseTitle = failedPhase?.title,
+            failedPhaseSummary = failedPhase?.let(::phaseSummary),
+            failedPhaseDetail = failedPhase?.let(::phaseDetail),
+            phaseStatusLines = statusLines,
+            allLogsText = trimmedLogs,
+        )
+    }
+
     private fun phaseDuration(startMs: Long?, endMs: Long?, nextStartMs: Long?): Long? {
         if (startMs == null) return null
         return when {

@@ -54,9 +54,13 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.DialogWindowProvider
 import io.legado.app.R
 import io.legado.app.data.entities.BookChapter
+import io.legado.app.help.gsyVideo.VideoDownloadProgress
+import io.legado.app.help.gsyVideo.VideoDownloadStatus
 import io.legado.app.ui.design.components.compose.NgDrawerDragHandle
 import io.legado.app.ui.design.components.compose.NgDrawerDragHandleVariant
 import kotlinx.coroutines.launch
+
+private val EpisodeDownloadGreen = Color(0xFF22C55E)
 
 @Composable
 internal fun VideoEpisodeSheet(
@@ -67,10 +71,17 @@ internal fun VideoEpisodeSheet(
     currentDuration: Long,
     onSelect: (Int, Int) -> Unit,
     onDismiss: () -> Unit,
+    translateTitle: (String) -> String = { it },
+    translateEnabled: Boolean = false,
+    onToggleTranslate: (() -> Unit)? = null,
+    downloadStates: Map<String, VideoDownloadProgress> = emptyMap(),
+    episodeCacheKey: (BookChapter) -> String = { "${it.index}_${it.url}" },
+    onDownloadEpisode: (BookChapter) -> Unit = {},
 ) {
     var browsingVolume by rememberSaveable { mutableIntStateOf(initialVolume) }
     var query by rememberSaveable { mutableStateOf("") }
     var searching by rememberSaveable { mutableStateOf(false) }
+    var downloadMode by rememberSaveable { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
     var descending by rememberSaveable { mutableStateOf(false) }
     var grid by rememberSaveable {
@@ -81,8 +92,8 @@ internal fun VideoEpisodeSheet(
     val group = groups.getOrNull(groupIndex)
     val totalCount = remember(groups) { groups.sumOf { it.items.size } }
     val hasTools = totalCount > 1 || groups.size > 1
-    val items = remember(groups, groupIndex, query, descending) {
-        filterVideoEpisodes(groups, groupIndex, query, descending) { it.title }
+    val items = remember(groups, groupIndex, query, descending, translateTitle) {
+        filterVideoEpisodes(groups, groupIndex, query, descending) { translateTitle(it.title) }
     }
     val selectedIndex = remember(items, currentVolume, currentEpisode) {
         items.indexOfFirst { it.volumeIndex == currentVolume && it.episodeIndex == currentEpisode }
@@ -156,8 +167,51 @@ internal fun VideoEpisodeSheet(
                             Text("选集", color = colors.content, fontSize = 17.sp, fontWeight = FontWeight.Medium)
                             Text(if (query.isBlank()) "${group?.items?.size ?: 0}集" else "${items.size}/$totalCount",
                                 Modifier.padding(start = 10.dp), color = colors.muted, fontSize = 12.sp)
+                            if (downloadMode) {
+                                Text(
+                                    text = "点选剧集下载",
+                                    modifier = Modifier
+                                        .padding(start = 8.dp)
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(EpisodeDownloadGreen.copy(alpha = 0.16f))
+                                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                                    color = EpisodeDownloadGreen,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium,
+                                )
+                            }
                             Spacer(Modifier.weight(1f))
                         }
+                        if (onToggleTranslate != null) {
+                            EpisodeIcon(
+                                icon = R.drawable.ic_translate,
+                                label = if (translateEnabled) "关闭目录翻译" else "翻译剧集名称",
+                                onClick = onToggleTranslate,
+                                active = translateEnabled,
+                            )
+                        }
+                        EpisodeIcon(
+                            icon = R.drawable.ic_download_line,
+                            label = if (downloadMode) "退出下载模式" else "下载剧集",
+                            onClick = {
+                                val targetCurrent = currentItem?.chapter ?: items.firstOrNull()?.chapter
+                                if (items.size <= 1 && targetCurrent != null) {
+                                    onDownloadEpisode(targetCurrent)
+                                } else if (!downloadMode) {
+                                    downloadMode = true
+                                    if (targetCurrent != null) {
+                                        val key = episodeCacheKey(targetCurrent)
+                                        val curStatus = downloadStates[key]?.status
+                                        if (curStatus == null || curStatus == VideoDownloadStatus.IDLE || curStatus == VideoDownloadStatus.FAILED) {
+                                            onDownloadEpisode(targetCurrent)
+                                        }
+                                    }
+                                } else {
+                                    downloadMode = false
+                                }
+                            },
+                            active = downloadMode,
+                        )
                         if (hasTools) {
                             EpisodeIcon(R.drawable.ic_search, if (searching) "收起搜索" else "搜索剧集", {
                                 searching = !searching
@@ -195,7 +249,7 @@ internal fun VideoEpisodeSheet(
                             Box(Modifier.height(48.dp).widthIn(min = 48.dp, max = 200.dp)
                                 .semantics { selected = active }
                                 .clickable(role = Role.Tab) { browsingVolume = index; focus.clearFocus() }, contentAlignment = Alignment.Center) {
-                                Text(value.volume?.title.orEmpty(), Modifier.padding(vertical = 10.dp), color = if (active) colors.content else colors.muted,
+                                Text(translateTitle(value.volume?.title.orEmpty()), Modifier.padding(vertical = 10.dp), color = if (active) colors.content else colors.muted,
                                     fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 if (active) Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(2.dp).background(accent))
                             }
@@ -221,9 +275,25 @@ internal fun VideoEpisodeSheet(
                         contentPadding = PaddingValues(horizontal = 18.dp, vertical = 12.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         gridItems(items, key = { "${it.chapter.index}:${it.chapter.url}" }) { item ->
-                            EpisodeTile(item, item.volumeIndex == currentVolume && item.episodeIndex == currentEpisode,
-                                colors, true, 0, null
-                            ) { onSelect(item.volumeIndex, item.episodeIndex); onDismiss() }
+                            val key = episodeCacheKey(item.chapter)
+                            EpisodeTile(
+                                item = item,
+                                current = item.volumeIndex == currentVolume && item.episodeIndex == currentEpisode,
+                                colors = colors,
+                                grid = true,
+                                duration = 0,
+                                volumeTitle = null,
+                                translateTitle = translateTitle,
+                                downloadProgress = downloadStates[key],
+                                onDownload = { onDownloadEpisode(item.chapter) },
+                            ) {
+                                if (downloadMode) {
+                                    onDownloadEpisode(item.chapter)
+                                } else {
+                                    onSelect(item.volumeIndex, item.episodeIndex)
+                                    onDismiss()
+                                }
+                            }
                         }
                     }
                     }
@@ -232,16 +302,31 @@ internal fun VideoEpisodeSheet(
                         contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 8.dp, bottom = if (hasTools) 12.dp else 24.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         items(items, key = { "${it.chapter.index}:${it.chapter.url}" }) { item ->
-                            EpisodeTile(item, item.volumeIndex == currentVolume && item.episodeIndex == currentEpisode,
-                                colors, false, if (item.volumeIndex == currentVolume && item.episodeIndex == currentEpisode) currentDuration else 0,
-                                if (query.isNotBlank()) groups.getOrNull(item.volumeIndex)?.volume?.title else null
-                            ) { onSelect(item.volumeIndex, item.episodeIndex); onDismiss() }
+                            val key = episodeCacheKey(item.chapter)
+                            EpisodeTile(
+                                item = item,
+                                current = item.volumeIndex == currentVolume && item.episodeIndex == currentEpisode,
+                                colors = colors,
+                                grid = false,
+                                duration = if (item.volumeIndex == currentVolume && item.episodeIndex == currentEpisode) currentDuration else 0,
+                                volumeTitle = if (query.isNotBlank()) groups.getOrNull(item.volumeIndex)?.volume?.title?.let(translateTitle) else null,
+                                translateTitle = translateTitle,
+                                downloadProgress = downloadStates[key],
+                                onDownload = { onDownloadEpisode(item.chapter) },
+                            ) {
+                                if (downloadMode) {
+                                    onDownloadEpisode(item.chapter)
+                                } else {
+                                    onSelect(item.volumeIndex, item.episodeIndex)
+                                    onDismiss()
+                                }
+                            }
                         }
                     }
                 }
                 if (hasTools && currentItem != null && !compactHeight) {
                     HorizontalDivider(Modifier.padding(horizontal = 18.dp), color = colors.content.copy(alpha = .1f))
-                    Text("第${currentItem.episodeIndex + 1}集 · ${currentItem.chapter.title}",
+                    Text("第${currentItem.episodeIndex + 1}集 · ${translateTitle(currentItem.chapter.title)}",
                         Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(onClickLabel = "定位当前集", onClick = ::locateCurrent)
                             .padding(horizontal = 18.dp, vertical = 12.dp),
                         color = colors.muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -252,45 +337,166 @@ internal fun VideoEpisodeSheet(
 }
 
 @Composable
-private fun EpisodeTile(item: VideoEpisodeItem<BookChapter>, current: Boolean, colors: VideoContentColors,
-                        grid: Boolean, duration: Long, volumeTitle: String?, onClick: () -> Unit) {
+private fun EpisodeTile(
+    item: VideoEpisodeItem<BookChapter>,
+    current: Boolean,
+    colors: VideoContentColors,
+    grid: Boolean,
+    duration: Long,
+    volumeTitle: String?,
+    translateTitle: (String) -> String = { it },
+    downloadProgress: VideoDownloadProgress? = null,
+    onDownload: () -> Unit = {},
+    onClick: () -> Unit,
+) {
+    val displayTitle = translateTitle(item.chapter.title)
+    val fillFraction = downloadProgress?.visualFraction ?: 0f
+    val hasDownloadFill = fillFraction > 0f
+    val isCompleted = downloadProgress?.status == VideoDownloadStatus.COMPLETED
+    val isDownloading = downloadProgress?.status == VideoDownloadStatus.DOWNLOADING
+    val statusText = downloadProgress?.shortStatusText()
+    val baseBg = if (current && grid && !hasDownloadFill) colors.selectedContainer else colors.cell
     val modifier = Modifier.fillMaxWidth().heightIn(min = if (grid) 72.dp else 56.dp)
         .clip(RoundedCornerShape(if (grid) 8.dp else 12.dp))
-        .background(if (current && grid) colors.selectedContainer else colors.cell)
+        .background(baseBg)
         .semantics { selected = current }.clickable(role = Role.Button, onClick = onClick)
-    if (grid) Box(modifier.semantics { contentDescription = "第${item.episodeIndex + 1}集 ${item.chapter.title}" },
+    if (grid) Box(modifier.semantics { contentDescription = "第${item.episodeIndex + 1}集 $displayTitle" },
         contentAlignment = Alignment.Center) {
-        val ink = if (current) colors.onAccent else colors.content
+        if (hasDownloadFill) {
+            Box(
+                Modifier
+                    .align(Alignment.CenterStart)
+                    .fillMaxHeight()
+                    .fillMaxWidth(fillFraction.coerceIn(0f, 1f))
+                    .background(
+                        if (isCompleted) EpisodeDownloadGreen.copy(alpha = 0.78f)
+                        else EpisodeDownloadGreen.copy(alpha = 0.60f)
+                    )
+            )
+        }
+        val ink = when {
+            hasDownloadFill -> Color.White
+            current -> colors.onAccent
+            else -> colors.content
+        }
         Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp),
             horizontalAlignment = Alignment.CenterHorizontally) {
             Text((item.episodeIndex + 1).toString().padStart(2, '0'), color = ink, fontSize = 15.sp,
                 fontWeight = FontWeight.Medium)
-            Text(item.chapter.title, Modifier.padding(top = 4.dp), color = ink,
+            Text(displayTitle, Modifier.padding(top = 4.dp), color = ink,
                 fontSize = 12.sp, lineHeight = 16.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
                 textAlign = TextAlign.Center)
+            if (statusText != null) {
+                Text(
+                    text = statusText,
+                    modifier = Modifier.padding(top = 2.dp),
+                    color = ink.copy(alpha = 0.92f),
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                )
+            }
         }
         if (item.chapter.isVip && !item.chapter.isPay) Icon(painterResource(R.drawable.ic_lock_outline), "VIP",
             Modifier.align(Alignment.TopEnd).padding(4.dp).size(10.dp), tint = ink)
-    } else Row(modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text((item.episodeIndex + 1).toString().padStart(2, '0'), color = if (current) colors.accent else colors.muted,
-            fontSize = 15.sp, fontWeight = FontWeight.Medium)
-        Box(Modifier.padding(horizontal = 12.dp).width(1.dp).height(20.dp).background(colors.content.copy(alpha = .16f)))
-        Column(Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                EpisodeAccess(item.chapter, colors.muted)
-                Text(item.chapter.title, color = colors.content, fontSize = 14.sp, lineHeight = 20.sp,
-                    fontWeight = if (current) FontWeight.Medium else FontWeight.Normal,
-                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+    } else Box(modifier) {
+        if (hasDownloadFill) {
+            Box(
+                Modifier
+                    .align(Alignment.CenterStart)
+                    .fillMaxHeight()
+                    .fillMaxWidth(fillFraction.coerceIn(0f, 1f))
+                    .background(
+                        if (isCompleted) EpisodeDownloadGreen.copy(alpha = 0.65f)
+                        else EpisodeDownloadGreen.copy(alpha = 0.50f)
+                    )
+            )
+        }
+        val rowContentColor = if (hasDownloadFill) Color.White else colors.content
+        val rowMutedColor = if (hasDownloadFill) Color.White.copy(alpha = 0.85f) else colors.muted
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(min = 56.dp)
+                .padding(start = 12.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                (item.episodeIndex + 1).toString().padStart(2, '0'),
+                color = when {
+                    hasDownloadFill -> Color.White
+                    current -> colors.accent
+                    else -> colors.muted
+                },
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            Box(
+                Modifier
+                    .padding(horizontal = 12.dp)
+                    .width(1.dp)
+                    .height(20.dp)
+                    .background(rowContentColor.copy(alpha = .16f))
+            )
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    EpisodeAccess(item.chapter, rowMutedColor)
+                    Text(
+                        displayTitle,
+                        color = rowContentColor,
+                        fontSize = 14.sp,
+                        lineHeight = 20.sp,
+                        fontWeight = if (current) FontWeight.Medium else FontWeight.Normal,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                listOfNotNull(volumeTitle, item.chapter.tag, statusText).filter { it.isNotBlank() }
+                    .joinToString(" · ").takeIf { it.isNotBlank() }?.let {
+                        Text(
+                            it,
+                            Modifier.padding(top = 3.dp),
+                            color = rowMutedColor,
+                            fontSize = 10.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
             }
-            listOfNotNull(volumeTitle, item.chapter.tag).filter { it.isNotBlank() }
-                .joinToString(" · ").takeIf { it.isNotBlank() }?.let {
-                Text(it, Modifier.padding(top = 3.dp), color = colors.muted, fontSize = 10.sp,
-                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+            if (duration > 0 && item.chapter.tag.isNullOrBlank()) {
+                Text(
+                    videoTime(duration),
+                    Modifier.padding(start = 8.dp),
+                    color = rowMutedColor,
+                    fontSize = 12.sp,
+                )
+            }
+            if (current) {
+                Icon(
+                    Icons.Default.Equalizer,
+                    "当前集",
+                    Modifier.padding(start = 8.dp).size(20.dp),
+                    tint = if (hasDownloadFill) Color.White else colors.accent,
+                )
+            }
+            IconButton(
+                onClick = onDownload,
+                modifier = Modifier.size(36.dp),
+            ) {
+                Icon(
+                    painter = painterResource(
+                        if (isCompleted) R.drawable.ic_check else R.drawable.ic_download_line
+                    ),
+                    contentDescription = if (isCompleted) "已缓存" else if (isDownloading) "取消下载" else "下载该集",
+                    modifier = Modifier.size(18.dp),
+                    tint = when {
+                        hasDownloadFill -> Color.White
+                        isCompleted -> EpisodeDownloadGreen
+                        else -> colors.muted
+                    },
+                )
             }
         }
-        if (duration > 0 && item.chapter.tag.isNullOrBlank()) Text(videoTime(duration), Modifier.padding(start = 12.dp),
-            color = colors.muted, fontSize = 12.sp)
-        if (current) Icon(Icons.Default.Equalizer, "当前集", Modifier.padding(start = 12.dp).size(20.dp), tint = colors.accent)
     }
 }
 

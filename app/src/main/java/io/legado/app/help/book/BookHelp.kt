@@ -13,6 +13,8 @@ import io.legado.app.data.entities.BookChapter
 import io.legado.app.data.entities.BookSource
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.exoplayer.AudioDownloadCache
+import io.legado.app.help.storage.BackupMediaStorage
+import io.legado.app.help.translate.BookTitleTranslator
 import io.legado.app.model.analyzeRule.AnalyzeUrl
 import io.legado.app.model.localBook.LocalBook
 import io.legado.app.utils.ArchiveUtils
@@ -61,6 +63,27 @@ object BookHelp {
     private const val cacheImageFolderName = "images"
     private const val cacheEpubFolderName = "epub"
     private val downloadImages = ConcurrentHashMap<String, Mutex>()
+    private val imageChapterTitleMap = ConcurrentHashMap<String, String>()
+
+    fun registerImageChapter(book: Book, chapter: BookChapter?, src: String) {
+        if (!book.isImage || chapter == null) return
+        val title = chapter.title.trim().ifBlank { "第${chapter.index + 1}章" }
+        imageChapterTitleMap["${book.bookUrl}|$src"] = title
+    }
+
+    private fun resolveMangaBookFolderName(book: Book): String {
+        val display = BookTitleTranslator.getCached(book.name)?.takeIf { it.isNotBlank() } ?: book.name
+        return BackupMediaStorage.sanitizeName(display, book.getFolderName())
+    }
+
+    private fun resolveMangaChapterFolderName(book: Book, src: String, chapter: BookChapter?): String {
+        val rawTitle = chapter?.title?.trim()?.takeIf { it.isNotBlank() }
+            ?: imageChapterTitleMap["${book.bookUrl}|$src"]
+            ?: chapter?.let { "第${it.index + 1}章" }
+            ?: "正文图片"
+        val display = BookTitleTranslator.getCached(rawTitle)?.takeIf { it.isNotBlank() } ?: rawTitle
+        return BackupMediaStorage.sanitizeName(display, "正文图片")
+    }
 
     val cachePath = FileUtils.getPath(downloadDir, cacheFolderName)
 
@@ -230,9 +253,36 @@ object BookHelp {
         content: String,
         concurrency: Int = AppConfig.threadCount
     ) = coroutineScope {
-        flowImages(bookChapter, content).onEachParallel(concurrency) { mSrc ->
+        val imageUrls = buildList {
+            val matcher = AppPattern.imgPattern.matcher(content)
+            while (matcher.find()) {
+                val src = matcher.group(1) ?: continue
+                val mSrc = NetworkUtils.getAbsoluteURL(bookChapter.url, src)
+                registerImageChapter(book, bookChapter, mSrc)
+                add(mSrc)
+            }
+        }
+        val total = imageUrls.size
+        val completedCount = java.util.concurrent.atomic.AtomicInteger(
+            imageUrls.count { isImageExist(book, it, bookChapter) }
+        )
+        if (book.isImage && total > 0) {
+            MangaChapterCacheTracker.update(book.bookUrl, bookChapter.index, completedCount.get(), total, downloading = true)
+        }
+        flow {
+            imageUrls.forEach { emit(it) }
+        }.onEachParallel(concurrency) { mSrc ->
+            val existed = isImageExist(book, mSrc, bookChapter)
             saveImage(bookSource, book, mSrc, bookChapter)
+            if (book.isImage && total > 0 && !existed && isImageExist(book, mSrc, bookChapter)) {
+                val now = completedCount.incrementAndGet()
+                MangaChapterCacheTracker.update(book.bookUrl, bookChapter.index, now, total, downloading = now < total)
+            }
         }.collect()
+        if (book.isImage && total > 0) {
+            val finalCached = imageUrls.count { isImageExist(book, it, bookChapter) }
+            MangaChapterCacheTracker.update(book.bookUrl, bookChapter.index, finalCached, total, downloading = false)
+        }
     }
 
     suspend fun saveImage(
@@ -258,10 +308,11 @@ object BookHelp {
         strict: Boolean,
     ) {
         fun hasCachedImage() = if (strict) {
-            getCachedBookImage(book, src) != null
+            getCachedBookImage(book, src, chapter) != null
         } else {
-            isImageExist(book, src)
+            isImageExist(book, src, chapter)
         }
+        registerImageChapter(book, chapter, src)
         if (strict) currentCoroutineContext().ensureActive()
         if (hasCachedImage()) {
             return
@@ -286,7 +337,7 @@ object BookHelp {
             }
             if (strict) {
                 if (decoded == null) throw IOException("漫画图片解密失败")
-                writeImageForCache(book, src, decoded)
+                writeImageForCache(book, src, decoded, chapter)
                 currentCoroutineContext().ensureActive()
             } else decoded?.let {
                 if (!checkImage(it)) {
@@ -295,7 +346,7 @@ object BookHelp {
                     // throw NoStackTraceException("数据异常")
                     AppLog.put("${book.name} ${chapter?.title} 图片 $src 下载错误 数据异常")
                 }
-                writeImage(book, src, it)
+                writeImage(book, src, it, chapter)
             }
         } catch (e: Exception) {
             currentCoroutineContext().ensureActive()
@@ -308,22 +359,48 @@ object BookHelp {
         }
     }
 
-    fun getImage(book: Book, src: String): File {
+    fun getImage(book: Book, src: String, chapter: BookChapter? = null): File {
+        val fileName = "${MD5Utils.md5Encode16(src)}.${getImageSuffix(src)}"
+        if (book.isImage) {
+            registerImageChapter(book, chapter, src)
+            val bookFolder = resolveMangaBookFolderName(book)
+            val chapterFolder = resolveMangaChapterFolderName(book, src, chapter)
+            val backupFile = File(File(BackupMediaStorage.mangaRootDir(), bookFolder), "$chapterFolder/$fileName")
+            if (backupFile.exists()) return backupFile
+            val legacyFile = downloadDir.getFile(
+                cacheFolderName,
+                book.getFolderName(),
+                cacheImageFolderName,
+                fileName
+            )
+            if (legacyFile.exists()) return legacyFile
+            return backupFile
+        }
         return downloadDir.getFile(
             cacheFolderName,
             book.getFolderName(),
             cacheImageFolderName,
-            "${MD5Utils.md5Encode16(src)}.${getImageSuffix(src)}"
+            fileName
         )
     }
 
     @Synchronized
-    fun writeImage(book: Book, src: String, bytes: ByteArray) {
-        getImage(book, src).createFileIfNotExist().writeBytes(bytes)
+    fun writeImage(book: Book, src: String, bytes: ByteArray, chapter: BookChapter? = null) {
+        val file = getImage(book, src, chapter)
+        file.createFileIfNotExist().writeBytes(bytes)
+        if (book.isImage) {
+            val bookFolder = resolveMangaBookFolderName(book)
+            val chapterFolder = resolveMangaChapterFolderName(book, src, chapter)
+            BackupMediaStorage.mirrorToSafBackupIfNeeded(
+                sourceFile = file,
+                subDirs = listOf(BackupMediaStorage.MANGA_FOLDER, bookFolder, chapterFolder),
+                fileName = file.name,
+            )
+        }
     }
 
-    private fun writeImageForCache(book: Book, src: String, bytes: ByteArray) {
-        val file = getImage(book, src)
+    private fun writeImageForCache(book: Book, src: String, bytes: ByteArray, chapter: BookChapter? = null) {
+        val file = getImage(book, src, chapter)
         val parent = file.parentFile ?: throw IOException("无法创建图片缓存目录")
         if (!parent.isDirectory && !parent.mkdirs() && !parent.isDirectory) {
             throw IOException("无法创建图片缓存目录")
@@ -345,14 +422,23 @@ object BookHelp {
                     if (!temporary.renameTo(file)) throw IOException("无法保存图片缓存")
                 }
             }
+            if (book.isImage) {
+                val bookFolder = resolveMangaBookFolderName(book)
+                val chapterFolder = resolveMangaChapterFolderName(book, src, chapter)
+                BackupMediaStorage.mirrorToSafBackupIfNeeded(
+                    sourceFile = file,
+                    subDirs = listOf(BackupMediaStorage.MANGA_FOLDER, bookFolder, chapterFolder),
+                    fileName = file.name,
+                )
+            }
         } finally {
             temporary.delete()
         }
     }
 
     @Synchronized
-    fun isImageExist(book: Book, src: String): Boolean {
-        return getImage(book, src).exists()
+    fun isImageExist(book: Book, src: String, chapter: BookChapter? = null): Boolean {
+        return getImage(book, src, chapter).exists()
     }
 
     fun getImageSuffix(src: String): String {

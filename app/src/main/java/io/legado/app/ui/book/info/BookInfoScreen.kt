@@ -176,6 +176,7 @@ internal data class BookInfoOtherWorkUiItem(
     val inBookshelf: Boolean,
     val originCount: Int,
     val canExpand: Boolean,
+    val displayTitle: String? = null,
 )
 
 internal sealed interface BookInfoOtherWorksState {
@@ -1180,6 +1181,7 @@ private fun BookInfoOtherWorks(
                         cardBackgroundColorRes = R.color.ng_book_detail_card_surface,
                         cardStrokeColorRes = R.color.ng_book_detail_card_stroke,
                         cardBorderWidth = 0.6.dp,
+                        displayTitle = item.displayTitle,
                     )
                 }
             }

@@ -2,6 +2,7 @@ package io.legado.app.ui.book.manage
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -10,14 +11,16 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Checkbox
@@ -36,6 +39,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -46,12 +50,14 @@ import io.legado.app.R
 import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookGroup
 import io.legado.app.help.book.summarizeBookGroups
-import io.legado.app.help.config.BookshelfCardAppearanceStore
 import io.legado.app.model.localBook.canExtractOriginalCover
 import io.legado.app.ui.design.components.NgButtonVariant
 import io.legado.app.ui.design.components.NgDialogVariant
 import io.legado.app.ui.design.components.compose.NgButton
 import io.legado.app.ui.design.components.compose.NgDialog
+import io.legado.app.ui.design.components.compose.NgGlassDefaults
+import io.legado.app.ui.design.components.compose.NgGlassSurface
+import io.legado.app.ui.design.components.compose.NgMaterialRole
 import io.legado.app.ui.design.components.compose.ngSlideSelect
 import io.legado.app.ui.design.components.compose.rememberNgLazySlideSelectState
 import io.legado.app.ui.design.theme.NgTheme
@@ -64,12 +70,12 @@ internal fun BookshelfManageScreen(
     query: String,
     groups: List<BookGroup>,
     selectedGroupId: Long,
+    selectedTypeFilter: BookshelfManageTypeFilter?,
     books: List<Book>,
     selectedBookUrls: Set<String>,
     cachedChapterCounts: Map<String, Int>,
     cacheChapterTotals: Map<String, Int>,
     clearableBookUrls: Set<String>,
-    cachedBytes: Map<String, Long>,
     sortOrder: BookshelfManageSort,
     coverUpdateSelection: List<Book>?,
     deleteDialogVisible: Boolean,
@@ -79,16 +85,23 @@ internal fun BookshelfManageScreen(
     exportedSourceUri: String?,
     onQueryChange: (String) -> Unit,
     onBack: () -> Unit,
+    onResetFilter: () -> Unit,
+    onTypeFilterSelected: (BookshelfManageTypeFilter) -> Unit,
     onGroupSelected: (Long) -> Unit,
     onGroupManage: () -> Unit,
     onSortChange: (BookshelfManageSort) -> Unit,
     onSelectionChange: (Book, Boolean) -> Unit,
     onOpenDetails: (Book) -> Unit,
+    onSwipeDelete: (Book) -> Unit,
+    onDownloadBook: (Book) -> Unit,
+    onExportBook: (Book) -> Unit,
+    onGroupBook: (Book) -> Unit,
+    onFetchCover: (Book) -> Unit,
     onReorderStarted: () -> Unit,
     onMove: (Int, Int) -> Unit,
     onReorderFinished: () -> Unit,
     onSelectAll: () -> Unit,
-    onInvertSelection: () -> Unit,
+    onClearSelection: () -> Unit,
     onDockAction: (BookshelfManageDockAction) -> Unit,
     onDismissCoverUpdate: () -> Unit,
     onConfirmCoverUpdate: () -> Unit,
@@ -99,14 +112,15 @@ internal fun BookshelfManageScreen(
     onDismissExportSuccess: () -> Unit,
     onCopyExportPath: () -> Unit,
 ) {
-    val isDark = NgTheme.snapshot.isDark
-    val cardAppearance = remember(isDark) {
-        BookshelfCardAppearanceStore.read().forNight(isDark)
-    }
     val visibleUrls = remember(books) {
         books.mapTo(hashSetOf()) { it.bookUrl }
     }
     val selectedCount = selectedBookUrls.count(visibleUrls::contains)
+    val selectAllState = when {
+        books.isEmpty() || selectedCount == 0 -> ToggleableState.Off
+        selectedCount >= books.size -> ToggleableState.On
+        else -> ToggleableState.Indeterminate
+    }
     val eligibleCounts = remember(books, selectedBookUrls, clearableBookUrls) {
         val selected = books.filter { it.bookUrl in selectedBookUrls }
         BookshelfManageDockAction.entries.associateWith { action ->
@@ -130,15 +144,26 @@ internal fun BookshelfManageScreen(
             }
         },
     )
+    val panelShape = RoundedCornerShape(NgTheme.shapes.mediumDp.dp)
+    val panelStyle = NgGlassDefaults.bookDetailStyle(
+        containerColor = colorResource(R.color.ng_surface_card)
+    )
 
-    Column(modifier = Modifier.fillMaxSize()) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .navigationBarsPadding()
+    ) {
         BookshelfManageTopBar(
             query = query,
             groups = groups,
             selectedGroupId = selectedGroupId,
+            selectedTypeFilter = selectedTypeFilter,
             sortOrder = sortOrder,
             onQueryChange = onQueryChange,
             onBack = onBack,
+            onResetFilter = onResetFilter,
+            onTypeFilterSelected = onTypeFilterSelected,
             onGroupSelected = onGroupSelected,
             onGroupManage = onGroupManage,
             onSortChange = { sort ->
@@ -146,75 +171,97 @@ internal fun BookshelfManageScreen(
                 sortScope.launch { listState.scrollToItem(0) }
             },
         )
-        LazyColumn(
+        Box(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .ngSlideSelect(
-                    state = slideSelectState,
-                    enabled = books.isNotEmpty() && !isReordering,
-                ),
-            state = listState,
-            contentPadding = PaddingValues(
-                start = 14.dp,
-                top = 4.dp,
-                end = 14.dp,
-                bottom = 4.dp,
-            ),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+                .padding(start = 14.dp, top = 4.dp, end = 14.dp, bottom = 8.dp)
         ) {
-            items(
-                items = books,
-                key = { it.bookUrl },
-            ) { book ->
-                ReorderableItem(
-                    state = reorderState,
-                    key = book.bookUrl,
-                ) { _ ->
-                    val selected = book.bookUrl in selectedBookUrls
-                    BookshelfManageBookCard(
-                        book = book,
-                        appearance = cardAppearance,
-                        selected = selected,
-                        groupNames = bookGroupNames(groups, book.group),
-                        cachedChapterCount = cachedChapterCounts[book.bookUrl],
-                        cacheChapterTotal = cacheChapterTotals[book.bookUrl],
-                        cacheBytes = cachedBytes[book.bookUrl],
-                        dragHandleEnabled = sortOrder.allowsDragging,
-                        dragHandleModifier = if (books.size > 1 && sortOrder.allowsDragging) {
-                            Modifier.draggableHandle(
-                                onDragStarted = {
-                                    isReordering = true
-                                    onReorderStarted()
-                                },
-                                onDragStopped = {
-                                    isReordering = false
-                                    onReorderFinished()
-                                },
-                            )
-                        } else {
-                            Modifier
-                        },
-                        onToggleSelected = {
-                            onSelectionChange(book, !selected)
-                        },
-                        onOpenDetails = { onOpenDetails(book) },
-                    )
+            NgGlassSurface(
+                modifier = Modifier.fillMaxSize(),
+                role = NgMaterialRole.CONTENT,
+                shape = panelShape,
+                style = panelStyle,
+                liquidCornerRadius = NgTheme.shapes.mediumDp.dp,
+            ) {
+                if (books.isEmpty()) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text(
+                            text = stringResource(R.string.empty),
+                            color = Color(NgTheme.colors.onSurfaceVariant),
+                            fontSize = 14.sp,
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .ngSlideSelect(
+                                state = slideSelectState,
+                                enabled = books.isNotEmpty() && !isReordering,
+                            ),
+                        state = listState,
+                        contentPadding = PaddingValues(vertical = 4.dp),
+                    ) {
+                        itemsIndexed(
+                            items = books,
+                            key = { _, book -> book.bookUrl },
+                        ) { index, book ->
+                            ReorderableItem(
+                                state = reorderState,
+                                key = book.bookUrl,
+                            ) { _ ->
+                                val selected = book.bookUrl in selectedBookUrls
+                                val bodyDragModifier = if (books.size > 1 && sortOrder.allowsDragging) {
+                                    Modifier.longPressDraggableHandle(
+                                        onDragStarted = {
+                                            isReordering = true
+                                            onReorderStarted()
+                                        },
+                                        onDragStopped = {
+                                            isReordering = false
+                                            onReorderFinished()
+                                        },
+                                    )
+                                } else {
+                                    Modifier
+                                }
+                                BookshelfManageBookRow(
+                                    book = book,
+                                    selected = selected,
+                                    groupNames = bookGroupNames(groups, book.group),
+                                    cachedChapterCount = cachedChapterCounts[book.bookUrl],
+                                    cacheChapterTotal = cacheChapterTotals[book.bookUrl],
+                                    showDivider = index < books.lastIndex,
+                                    bodyDragModifier = bodyDragModifier,
+                                    onToggleSelected = {
+                                        onSelectionChange(book, !selected)
+                                    },
+                                    onOpenDetails = { onOpenDetails(book) },
+                                    onSwipeDelete = { onSwipeDelete(book) },
+                                    onDownloadBook = { onDownloadBook(book) },
+                                    onExportBook = { onExportBook(book) },
+                                    onGroupBook = { onGroupBook(book) },
+                                    onFetchCover = { onFetchCover(book) },
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
         BookshelfManageBottomDock(
             selectedCount = selectedCount,
             totalCount = books.size,
+            selectAllState = selectAllState,
             eligibleCounts = eligibleCounts,
             modifier = Modifier.padding(
                 start = 14.dp,
-                top = 8.dp,
                 end = 14.dp,
                 bottom = 8.dp,
             ),
             onSelectAll = onSelectAll,
-            onInvertSelection = onInvertSelection,
+            onClearSelection = onClearSelection,
             onAction = onDockAction,
         )
     }

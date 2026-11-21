@@ -13,6 +13,7 @@ import io.legado.app.constant.EventBus
 import io.legado.app.constant.IntentAction
 import io.legado.app.constant.NotificationId
 import io.legado.app.constant.PreferKey
+import io.legado.app.help.config.AppConfig
 import io.legado.app.receiver.NetworkChangedListener
 import io.legado.app.utils.NetworkUtils
 import io.legado.app.utils.getPrefInt
@@ -31,6 +32,7 @@ import java.io.IOException
 class McpService : BaseService() {
 
     companion object {
+        private const val LOOPBACK_HOST = "127.0.0.1"
         var isRun = false
         var hostAddress = ""
 
@@ -96,43 +98,74 @@ class McpService : BaseService() {
         if (mcpHttpServer?.isAlive == true) {
             mcpHttpServer?.stop()
         }
-        val addressList = NetworkUtils.getLocalIPAddress()
-        if (addressList.any()) {
-            val port = getPort()
-            mcpHttpServer = McpHttpServer(port)
-            try {
-                mcpHttpServer?.start()
-                updateHostAddress()
-                isRun = true
-                postEvent(EventBus.MCP_SERVICE, hostAddress)
-                startForegroundNotification()
-            } catch (e: IOException) {
-                toastOnUi(e.localizedMessage ?: "")
-                e.printOnDebug()
-                stopSelf()
-            }
+        val port = getPort()
+        val bindHost = if (AppConfig.mcpLocalOnly || resolveLanAddresses().isEmpty()) {
+            LOOPBACK_HOST
         } else {
-            toastOnUi("mcp service cant start, no ip address")
+            null
+        }
+        mcpHttpServer = McpHttpServer(bindHost, port)
+        try {
+            mcpHttpServer?.start()
+            updateHostAddress()
+            isRun = true
+            postEvent(EventBus.MCP_SERVICE, hostAddress)
+            startForegroundNotification()
+        } catch (e: IOException) {
+            toastOnUi(e.localizedMessage ?: "")
+            e.printOnDebug()
             stopSelf()
         }
     }
 
     private fun updateHostAddress() {
-        val addressList = NetworkUtils.getLocalIPAddress()
-        val messages = if (addressList.any()) {
-            addressList.map { address ->
+        val port = getPort()
+        val messages = if (AppConfig.mcpLocalOnly) {
+            listOf(
                 getString(
                     R.string.mcp_service_url_format,
-                    getString(R.string.http_ip, address.hostAddress, getPort())
+                    getString(R.string.http_ip, LOOPBACK_HOST, port)
+                )
+            )
+        } else {
+            val lanAddresses = resolveLanAddresses()
+            if (lanAddresses.isNotEmpty()) {
+                lanAddresses.map { ip ->
+                    getString(
+                        R.string.mcp_service_url_format,
+                        getString(R.string.http_ip, ip, port)
+                    )
+                }
+            } else {
+                listOf(
+                    getString(
+                        R.string.mcp_service_url_format,
+                        getString(R.string.http_ip, LOOPBACK_HOST, port)
+                    )
                 )
             }
-        } else {
-            listOf(getString(R.string.network_connection_unavailable))
         }
         hostAddress = messages.first()
         // Network callbacks and service startup can run concurrently. Publish a
         // complete immutable value instead of mutating a list another thread reads.
         notificationText = messages.joinToString("\n")
+    }
+
+    private fun resolveLanAddresses(): List<String> {
+        return NetworkUtils.getLocalIPAddress()
+            .asSequence()
+            .filter { it.isSiteLocalAddress }
+            .mapNotNull { it.hostAddress?.trim()?.takeIf(String::isNotBlank) }
+            .distinct()
+            .sortedBy { ip ->
+                when {
+                    ip.startsWith("192.168.") -> 0
+                    ip.startsWith("10.") -> 1
+                    ip.startsWith("172.") -> 2
+                    else -> 3
+                }
+            }
+            .toList()
     }
 
     private fun getPort(): Int {

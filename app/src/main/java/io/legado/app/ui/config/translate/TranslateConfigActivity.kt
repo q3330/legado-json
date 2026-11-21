@@ -421,25 +421,14 @@ private fun TranslateEngineListView(
                                 NgStatusTagStyle.COMPACT,
                             )
                     }
-                    val statusTags = buildList {
-                        add(
-                            NgStatusTagSpec(
-                                text = stringResource(if (engine.enabled) R.string.enabled else R.string.disabled),
-                                variant = if (engine.enabled) NgStatusTagVariant.SUCCESS else NgStatusTagVariant.WARNING,
-                                style = NgStatusTagStyle.COMPACT,
-                            )
-                        )
-                        add(keyTag)
-                        if (historyBooks.isNotEmpty() && engine.enabled) {
-                            add(
-                                NgStatusTagSpec(
-                                    text = "${historyBooks.size}条记录",
-                                    variant = NgStatusTagVariant.INFO,
-                                    style = NgStatusTagStyle.COMPACT,
-                                )
-                            )
-                        }
-                    }
+                    val statusTags = listOf(
+                        NgStatusTagSpec(
+                            text = stringResource(if (engine.enabled) R.string.enabled else R.string.disabled),
+                            variant = if (engine.enabled) NgStatusTagVariant.SUCCESS else NgStatusTagVariant.WARNING,
+                            style = NgStatusTagStyle.COMPACT,
+                        ),
+                        keyTag,
+                    )
 
                     val hostLabel = remember(engine.endpoint) {
                         runCatching {
@@ -447,6 +436,11 @@ private fun TranslateEngineListView(
                             if (u.startsWith("dict://")) u
                             else java.net.URI(u).host.orEmpty().ifBlank { u }
                         }.getOrDefault(engine.endpoint)
+                    }
+                    val summaryLabel = remember(hostLabel, engine.type.label, historyBooks.size, engine.enabled) {
+                        val base = hostLabel.ifBlank { engine.type.label }
+                        if (historyBooks.isNotEmpty() && engine.enabled) "$base · ${historyBooks.size}条记录"
+                        else base
                     }
 
                     LeftSwipeToDelete(
@@ -456,7 +450,7 @@ private fun TranslateEngineListView(
                             title = engine.name.ifBlank { engine.type.label },
                             variant = NgManagementListCardVariant.PROVIDER_TWO_ROW,
                             summaryTag = NgStatusTagSpec(
-                                text = hostLabel.ifBlank { engine.type.label },
+                                text = summaryLabel,
                                 variant = NgStatusTagVariant.INFO,
                                 style = NgStatusTagStyle.COMPACT,
                             ),
@@ -596,6 +590,7 @@ private fun TranslateEngineConfigTab(
 
     var globalEnabled by remember { mutableStateOf(TranslateConfig.enabled) }
     var globalIntro by remember { mutableStateOf(TranslateConfig.translateIntro) }
+    var globalCatalog by remember { mutableStateOf(TranslateConfig.translateCatalog) }
     var globalContentDefault by remember { mutableStateOf(TranslateConfig.translateContentDefault) }
     var cacheCount by remember { mutableIntStateOf(BookTitleTranslator.cacheSize()) }
 
@@ -1055,6 +1050,16 @@ private fun TranslateEngineConfigTab(
                     onCheckedChange = {
                         globalIntro = it
                         TranslateConfig.translateIntro = it
+                    },
+                    density = NgFormDensity.COMPACT,
+                )
+                Spacer(Modifier.height(6.dp))
+                NgFormSwitchRow(
+                    title = "默认启用目录与章节名翻译",
+                    checked = globalCatalog,
+                    onCheckedChange = {
+                        globalCatalog = it
+                        TranslateConfig.translateCatalog = it
                     },
                     density = NgFormDensity.COMPACT,
                 )

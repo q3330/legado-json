@@ -69,9 +69,12 @@ object McpInternalToolCatalog {
             ),
             capability(
                 id = "book_source.debug",
-                title = "调试书源",
-                description = "运行书源规则调试并读取过程日志",
-                "book_source_debug"
+                title = "制作与调试书源",
+                description = "抓取网页源码、WebView 嗅探抓包、单步规则试算及运行草稿书源调试",
+                "book_source_debug",
+                "book_source_fetch_html",
+                "book_source_webview_capture",
+                "book_source_eval_rule"
             )
         ),
         module(

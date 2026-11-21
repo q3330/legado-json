@@ -51,7 +51,7 @@ data class BookshelfLayoutProfile(
             columns = if (mode == BookshelfLayoutMode.GROUP_GRID) {
                 columns.coerceIn(2, 4)
             } else {
-                columns.coerceIn(2, 6)
+                columns.coerceIn(1, 6)
             },
             innerColumns = innerColumns.coerceIn(2, 6),
             showBookName = showBookName.coerceIn(0, 2),

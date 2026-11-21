@@ -62,6 +62,7 @@ class ServiceConfigFragment : BaseFragment(R.layout.fragment_service_config),
                         },
                         onMcpPortChanged = ::setMcpPortDraft,
                         onMcpPortChangeFinished = ::saveMcpPort,
+                        onMcpLocalOnlyChanged = ::setMcpLocalOnly,
                     )
                     ServiceConfigDialogHost(
                         dialog = activeDialog,
@@ -140,6 +141,16 @@ class ServiceConfigFragment : BaseFragment(R.layout.fragment_service_config),
                 }
             }
 
+            PreferKey.mcpLocalOnly -> {
+                screenState = screenState.copy(
+                    mcpLocalOnly = AppConfig.mcpLocalOnly,
+                )
+                if (McpService.isRun) {
+                    McpService.stop(requireContext())
+                    McpService.start(requireContext())
+                }
+            }
+
             PreferKey.webServiceWakeLock -> {
                 screenState = screenState.copy(
                     webServiceWakeLock = getPrefBoolean(PreferKey.webServiceWakeLock),
@@ -173,6 +184,7 @@ class ServiceConfigFragment : BaseFragment(R.layout.fragment_service_config),
                 R.string.mcp_port_summary,
                 AppConfig.mcpPort.toString(),
             ),
+            mcpLocalOnly = AppConfig.mcpLocalOnly,
         )
     }
 
@@ -188,6 +200,7 @@ class ServiceConfigFragment : BaseFragment(R.layout.fragment_service_config),
                 R.string.mcp_port_summary,
                 AppConfig.mcpPort.toString(),
             ),
+            mcpLocalOnly = AppConfig.mcpLocalOnly,
         )
     }
 
@@ -226,6 +239,11 @@ class ServiceConfigFragment : BaseFragment(R.layout.fragment_service_config),
 
     private fun saveMcpPort() {
         AppConfig.mcpPort = screenState.mcpPort
+    }
+
+    private fun setMcpLocalOnly(enabled: Boolean) {
+        screenState = screenState.copy(mcpLocalOnly = enabled)
+        AppConfig.mcpLocalOnly = enabled
     }
 
 }

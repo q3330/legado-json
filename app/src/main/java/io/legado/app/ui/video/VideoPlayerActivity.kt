@@ -164,6 +164,10 @@ class VideoPlayerActivity : VMBaseActivity<ComposeActivityBinding, VideoPlayerVi
             }
             VideoPlay.startPlay(VideoPlaybackBridge)
             if (!VideoPlay.singleUrl) VideoPlay.saveRead(VideoPlay.durChapterPos)
+            if (VideoPlay.isPlayingCachedVideo) {
+                changePresentation(VideoPresentation.FULLSCREEN)
+                initialPresentation = true
+            }
         }
         savedInstanceState?.getString("videoPresentation")?.let {
             presentation = runCatching { VideoPresentation.valueOf(it) }.getOrDefault(VideoPresentation.WINDOW)
@@ -177,8 +181,17 @@ class VideoPlayerActivity : VMBaseActivity<ComposeActivityBinding, VideoPlayerVi
         viewModel.upStarMenuData.observe(this) { revision++ }
         binding.composeView.setContent {
             NgAppTheme(updateSystemBars = false) {
-                VideoPlayerScreen(this, presentation, revision, introContainer, ::changePresentation,
-                    { onBackPressedDispatcher.onBackPressed() }, ::handleAction, ::selectEpisode)
+                VideoPlayerScreen(
+                    owner = this,
+                    mode = presentation,
+                    revision = revision,
+                    intro = introContainer,
+                    onMode = ::changePresentation,
+                    onBack = { onBackPressedDispatcher.onBackPressed() },
+                    onAction = ::handleAction,
+                    onEpisode = ::selectEpisode,
+                    onAddedToShelf = { setResult(RESULT_OK) },
+                )
                 if (showShelfConfirm) Dialog({ showShelfConfirm = false }) {
                     NgDialog(getString(R.string.add_to_bookshelf), variant = NgDialogVariant.CLASSIC_CONFIRMATION,
                         titleFontSize = 18.sp, titleFontWeight = FontWeight.Medium, actions = {
@@ -214,8 +227,11 @@ class VideoPlayerActivity : VMBaseActivity<ComposeActivityBinding, VideoPlayerVi
                 else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 if (!initialPresentation && state.prepared && state.width > 0 && state.height > 0) {
                     initialPresentation = true
-                    if (VideoPlay.startFull && VideoPlay.autoPlay) changePresentation(VideoPresentation.FULLSCREEN)
-                    else if (VideoPlay.isPortraitVideo) changePresentation(VideoPresentation.IMMERSIVE)
+                    if (VideoPlay.isPlayingCachedVideo || (VideoPlay.startFull && VideoPlay.autoPlay)) {
+                        changePresentation(VideoPresentation.FULLSCREEN)
+                    } else if (VideoPlay.isPortraitVideo) {
+                        changePresentation(VideoPresentation.IMMERSIVE)
+                    }
                 }
             }
         }
@@ -231,6 +247,9 @@ class VideoPlayerActivity : VMBaseActivity<ComposeActivityBinding, VideoPlayerVi
         VideoPlay.chapterInVolumeIndex = episodeIndex
         VideoPlay.upEpisodes(); VideoPlay.saveRead(0); revision++
         VideoPlay.startPlay(VideoPlaybackBridge)
+        if (VideoPlay.isPlayingCachedVideo && presentation == VideoPresentation.WINDOW) {
+            changePresentation(VideoPresentation.FULLSCREEN)
+        }
     }
     private fun changePresentation(mode: VideoPresentation) {
         if (presentation == VideoPresentation.WINDOW) {
@@ -392,7 +411,12 @@ class VideoPlayerActivity : VMBaseActivity<ComposeActivityBinding, VideoPlayerVi
     }
     override fun observeLiveBus() {
         observeEventSticky<String>(EventBus.VIDEO_SUB_TITLE) { revision++ }
-        observeEvent<ArrayList<Int>>(EventBus.UP_VIDEO_INFO) { revision++ }
+        observeEvent<ArrayList<Int>>(EventBus.UP_VIDEO_INFO) { flags ->
+            revision++
+            if (flags.contains(2) && VideoPlay.isPlayingCachedVideo && presentation == VideoPresentation.WINDOW) {
+                changePresentation(VideoPresentation.FULLSCREEN)
+            }
+        }
     }
     override fun finish() {
         if (pendingFloat) return

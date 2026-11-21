@@ -13,7 +13,7 @@
     <string name="text_selection_system_actions_hint">系统应用自动排在更多菜单末尾</string>
     <string name="switch_selection_read_mode">切换选中文字朗读模式</string>
     <!--App-->
-    <string name="app_name">阅读-源</string>
+    <string name="app_name">阅读</string>
     <string name="receiving_shared_label">Legado 书源·搜索</string>
     <string name="tip_perm_request_storage">阅读需要访问存储卡权限，请前往“设置”—“应用权限”，打开所需权限</string>
 
@@ -321,7 +321,7 @@
     <string name="book_source_manage">书源管理</string>
     <string name="book_source_manage_desc">新建、导入、编辑或管理书源</string>
     <string name="rule_management">规则管理</string>
-    <string name="rule_management_summary">管理 TXT 目录、替换净化、字典规则和翻译接口</string>
+    <string name="rule_management_summary">管理目录,替换,字典与翻译</string>
     <string name="translate_api">翻译接口</string>
     <string name="translate_api_desc">管理自动翻译引擎与记录</string>
     <string name="book_original_name_show">原名：%s</string>
@@ -379,6 +379,9 @@
     <string name="mcp_service_url_format">%s/mcp</string>
     <string name="mcp_port_title">MCP 端口</string>
     <string name="mcp_port_summary">当前端口 %s</string>
+    <string name="mcp_local_only">仅本机访问（127.0.0.1）</string>
+    <string name="mcp_local_only_summary">仅监听 127.0.0.1（适合 ADB 转发）；关闭时仅允许局域网和本机访问，始终屏蔽公网</string>
+    <string name="book_source_debug_ai_repair">AI 解析与修复</string>
     <string name="service_port_decrease">端口减一</string>
     <string name="service_port_increase">端口加一</string>
     <string name="service_port_range_step">范围 %1$d–%2$d · 点按 ±1 · 长按连续</string>
@@ -1023,6 +1026,7 @@
     <string name="join_group">关注：%s</string>
     <string name="copy_complete">已拷贝</string>
     <string name="bookshelf_management">书架管理</string>
+    <string name="content_manage">内容管理</string>
     <string name="clear_bookshelf_s">这将会删除所有书籍，请谨慎操作。</string>
     <string name="search_book_source">搜索书源</string>
     <string name="search_rss_source">搜索订阅源</string>
@@ -1484,6 +1488,8 @@
     <string name="web_dav_account_s">输入你的 WebDav 账号</string>
     <string name="rss_source">订阅源</string>
     <string name="rss_source_manage">订阅源管理</string>
+    <string name="my_rss_manage">订阅管理</string>
+    <string name="my_rss_manage_desc">新建,导入,编辑或管理订阅</string>
     <string name="rss_source_edit">编辑订阅源</string>
     <string name="rss_source_scope_all">全部订阅源</string>
     <string name="rss_source_scope_search">搜索结果</string>

@@ -5,4 +5,5 @@
     <item name="menu_book_src" type="id" />
     <item name="menu_toc_src" type="id" />
     <item name="menu_refresh_explore" type="id" />
+    <item name="menu_ai_repair" type="id" />
 </resources>

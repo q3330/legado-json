@@ -25,7 +25,12 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.PopupProperties
 import io.legado.app.R
+import io.legado.app.data.entities.Book
 import io.legado.app.data.entities.BookGroup
+import io.legado.app.help.book.isAudio
+import io.legado.app.help.book.isImage
+import io.legado.app.help.book.isLocal
+import io.legado.app.help.book.isVideo
 import io.legado.app.ui.design.components.compose.NgExpandableActionMenu
 import io.legado.app.ui.design.components.compose.NgExpandableActionMenuItem
 import io.legado.app.ui.design.components.compose.NgExpandableActionMenuVariant
@@ -41,23 +46,47 @@ import io.legado.app.ui.design.theme.NgTheme
 private const val ALL_GROUP_ITEM_ID = 0x53FFFFFF
 private const val UNGROUPED_GROUP_ITEM_ID = 0x53FFFFFE
 private const val SORT_MENU_ITEM_ID = 0x53FFFFFC
+private const val FILTER_TYPE_PARENT_ITEM_ID = 0x53FFFFF0
+private const val FILTER_GROUP_PARENT_ITEM_ID = 0x53FFFFF1
+private const val FILTER_TYPE_ITEM_ID_BASE = 0x53FFFFE0
 private const val GROUP_ITEM_ID_BASE = 0x54000000
 private const val SORT_ITEM_ID_BASE = 0x55000000
+
+internal enum class BookshelfManageTypeFilter {
+    TEXT,
+    IMAGE,
+    VIDEO,
+    AUDIO,
+    FILE;
+
+    fun matches(book: Book): Boolean = when (this) {
+        IMAGE -> book.isImage
+        VIDEO -> book.isVideo
+        AUDIO -> book.isAudio
+        FILE -> !book.isImage && !book.isVideo && !book.isAudio && book.isLocal
+        TEXT -> !book.isImage && !book.isVideo && !book.isAudio && !book.isLocal
+    }
+}
 
 @Composable
 internal fun BookshelfManageTopBar(
     query: String,
     groups: List<BookGroup>,
     selectedGroupId: Long,
+    selectedTypeFilter: BookshelfManageTypeFilter?,
     sortOrder: BookshelfManageSort,
     onQueryChange: (String) -> Unit,
     onBack: () -> Unit,
+    onResetFilter: () -> Unit,
+    onTypeFilterSelected: (BookshelfManageTypeFilter) -> Unit,
     onGroupSelected: (groupId: Long) -> Unit,
     onGroupManage: () -> Unit,
     onSortChange: (BookshelfManageSort) -> Unit,
 ) {
-    val menuState = remember { NgPopupToggleState() }
+    val filterMenuState = remember { NgPopupToggleState() }
+    val mainMenuState = remember { NgPopupToggleState() }
     val actionContentColor = colorResource(R.color.ng_search_icon)
+    val activeActionColor = Color(NgTheme.colors.primary)
     val headerShape = RoundedCornerShape(NgTheme.shapes.mediumDp.dp)
     val headerStyle = NgGlassDefaults.bookDetailStyle(
         containerColor = colorResource(R.color.ng_bookshelf_manage_header_surface)
@@ -65,12 +94,81 @@ internal fun BookshelfManageTopBar(
     val groupedEntries = remember(groups) {
         groups.filterNot { it.groupId == BookGroup.IdAll || it.groupId == BookGroup.IdNoGroup }
     }
-    val defaultExpandedItemIds = remember(groupedEntries.size) {
-        if (groupedEntries.size <= 10) {
-            setOf(R.id.menu_book_group)
-        } else {
-            emptySet()
-        }
+    val filterActive = selectedGroupId != BookGroup.IdAll || selectedTypeFilter != null
+    val filterMenuItems = remember(groupedEntries, selectedGroupId, selectedTypeFilter) {
+        listOf(
+            NgExpandableActionMenuItem(
+                itemId = ALL_GROUP_ITEM_ID,
+                titleRes = R.string.all,
+                iconRes = R.drawable.ic_select_all,
+                checked = selectedGroupId == BookGroup.IdAll && selectedTypeFilter == null,
+            ),
+            NgExpandableActionMenuItem(
+                itemId = FILTER_TYPE_PARENT_ITEM_ID,
+                titleRes = R.string.book_source_filter_type,
+                iconRes = R.drawable.ic_sort,
+                children = listOf(
+                    NgExpandableActionMenuItem(
+                        itemId = FILTER_TYPE_ITEM_ID_BASE + BookshelfManageTypeFilter.TEXT.ordinal,
+                        titleRes = R.string.book_source_filter_type_text,
+                        iconRes = R.drawable.ic_ai_capability_text,
+                        checked = selectedTypeFilter == BookshelfManageTypeFilter.TEXT,
+                    ),
+                    NgExpandableActionMenuItem(
+                        itemId = FILTER_TYPE_ITEM_ID_BASE + BookshelfManageTypeFilter.IMAGE.ordinal,
+                        titleRes = R.string.book_source_filter_type_image,
+                        iconRes = R.drawable.ic_image,
+                        checked = selectedTypeFilter == BookshelfManageTypeFilter.IMAGE,
+                    ),
+                    NgExpandableActionMenuItem(
+                        itemId = FILTER_TYPE_ITEM_ID_BASE + BookshelfManageTypeFilter.VIDEO.ordinal,
+                        titleRes = R.string.book_source_filter_type_video,
+                        iconRes = R.drawable.ic_ai_capability_video,
+                        checked = selectedTypeFilter == BookshelfManageTypeFilter.VIDEO,
+                    ),
+                    NgExpandableActionMenuItem(
+                        itemId = FILTER_TYPE_ITEM_ID_BASE + BookshelfManageTypeFilter.AUDIO.ordinal,
+                        titleRes = R.string.book_source_filter_type_audio,
+                        iconRes = R.drawable.ic_tts_headphones,
+                        checked = selectedTypeFilter == BookshelfManageTypeFilter.AUDIO,
+                    ),
+                    NgExpandableActionMenuItem(
+                        itemId = FILTER_TYPE_ITEM_ID_BASE + BookshelfManageTypeFilter.FILE.ordinal,
+                        titleRes = R.string.book_source_filter_type_file,
+                        iconRes = R.drawable.ic_folder_open,
+                        checked = selectedTypeFilter == BookshelfManageTypeFilter.FILE,
+                    ),
+                ),
+            ),
+            NgExpandableActionMenuItem(
+                itemId = FILTER_GROUP_PARENT_ITEM_ID,
+                titleRes = R.string.book_source_filter_group,
+                iconRes = R.drawable.ic_groups,
+                children = listOf(
+                    NgExpandableActionMenuItem(
+                        itemId = UNGROUPED_GROUP_ITEM_ID,
+                        titleRes = R.string.no_group,
+                        iconRes = R.drawable.ic_bookshelf_dock_ungrouped,
+                        checked = selectedGroupId == BookGroup.IdNoGroup,
+                    ),
+                ) + groupedEntries.mapIndexed { index, group ->
+                    NgExpandableActionMenuItem(
+                        itemId = GROUP_ITEM_ID_BASE + index,
+                        titleRes = 0,
+                        iconRes = when (group.groupId) {
+                            BookGroup.IdLocal -> R.drawable.ic_bookshelf_dock_local
+                            BookGroup.IdAudio -> R.drawable.ic_bookshelf_dock_audio
+                            BookGroup.IdNovel -> R.drawable.ic_bookshelf_dock_novel
+                            BookGroup.IdManga -> R.drawable.ic_source_group_comic
+                            BookGroup.IdVideo -> R.drawable.ic_bookshelf_dock_video
+                            else -> R.drawable.ic_bookshelf_manage_filter_group
+                        },
+                        title = group.groupName,
+                        checked = group.groupId == selectedGroupId,
+                    )
+                },
+            ),
+        )
     }
     val sortMenuItems = remember(sortOrder) {
         BookshelfManageSort.entries.map { sort ->
@@ -96,12 +194,12 @@ internal fun BookshelfManageTopBar(
             )
         }
     }
-    val menuItems = remember(groupedEntries, selectedGroupId, sortMenuItems) {
+    val mainMenuItems = remember(sortMenuItems) {
         listOf(
             NgExpandableActionMenuItem(
                 itemId = R.id.menu_group_manage,
                 titleRes = R.string.group_manage,
-                iconRes = R.drawable.ic_bookshelf_manage_filter_settings
+                iconRes = R.drawable.ic_bookshelf_manage_filter_settings,
             ),
             NgExpandableActionMenuItem(
                 itemId = SORT_MENU_ITEM_ID,
@@ -109,40 +207,6 @@ internal fun BookshelfManageTopBar(
                 iconRes = R.drawable.ic_swap_vert,
                 children = sortMenuItems,
             ),
-            NgExpandableActionMenuItem(
-                itemId = R.id.menu_book_group,
-                titleRes = R.string.group,
-                iconRes = R.drawable.ic_bookshelf_manage_filter_group,
-                children = listOf(
-                    NgExpandableActionMenuItem(
-                        itemId = ALL_GROUP_ITEM_ID,
-                        titleRes = R.string.all,
-                        iconRes = R.drawable.ic_bookshelf_group_all,
-                        checked = selectedGroupId == BookGroup.IdAll,
-                    ),
-                    NgExpandableActionMenuItem(
-                        itemId = UNGROUPED_GROUP_ITEM_ID,
-                        titleRes = R.string.no_group,
-                        iconRes = R.drawable.ic_bookshelf_dock_ungrouped,
-                        checked = selectedGroupId == BookGroup.IdNoGroup,
-                    ),
-                ) + groupedEntries.mapIndexed { index, group ->
-                    NgExpandableActionMenuItem(
-                        itemId = GROUP_ITEM_ID_BASE + index,
-                        titleRes = 0,
-                        iconRes = when (group.groupId) {
-                            BookGroup.IdLocal -> R.drawable.ic_bookshelf_dock_local
-                            BookGroup.IdAudio -> R.drawable.ic_bookshelf_dock_audio
-                            BookGroup.IdNovel -> R.drawable.ic_bookshelf_dock_novel
-                            BookGroup.IdManga -> R.drawable.ic_source_group_comic
-                            BookGroup.IdVideo -> R.drawable.ic_bookshelf_dock_video
-                            else -> R.drawable.ic_bookshelf_manage_filter_group
-                        },
-                        title = group.groupName,
-                        checked = group.groupId == selectedGroupId
-                    )
-                }
-            )
         )
     }
 
@@ -158,72 +222,116 @@ internal fun BookshelfManageTopBar(
             shape = headerShape,
             style = headerStyle
         ) {
-            Column(modifier = Modifier.fillMaxWidth()) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(52.dp)
-                        .padding(horizontal = 10.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    NgFloatingToolbarBackButton(onClick = onBack)
-                    NgSearchBar(
-                        query = query,
-                        onQueryChange = onQueryChange,
-                        hint = stringResource(R.string.search_book_key),
-                        modifier = Modifier.weight(1f),
-                        variant = NgSearchBarVariant.TOOLBAR,
-                        containerColor = Color.Transparent,
-                        hideHintOnFocus = true
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Box {
-                        Box(
-                            modifier = Modifier
-                                .size(36.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .clickable { menuState.onAnchorClick() },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                painter = painterResource(R.drawable.ic_grid_menu),
-                                contentDescription = stringResource(R.string.menu),
-                                tint = actionContentColor,
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-                        NgExpandableActionMenu(
-                            expanded = menuState.expanded,
-                            onDismissRequest = menuState::onDismissRequest,
-                            items = menuItems,
-                            defaultExpandedItemIds = defaultExpandedItemIds,
-                            variant = NgExpandableActionMenuVariant.SIDE_SLIDE,
-                            width = 156.dp,
-                            menuContainerColor = colorResource(R.color.ng_surface_card),
-                            properties = PopupProperties(
-                                focusable = true,
-                                clippingEnabled = false
-                            ),
-                            onItemClick = { item ->
-                                menuState.close()
-                                when (item.itemId) {
-                                    R.id.menu_group_manage -> onGroupManage()
-                                    ALL_GROUP_ITEM_ID -> onGroupSelected(BookGroup.IdAll)
-                                    UNGROUPED_GROUP_ITEM_ID -> onGroupSelected(BookGroup.IdNoGroup)
-                                    else -> {
-                                        val sort = BookshelfManageSort.entries.getOrNull(item.itemId - SORT_ITEM_ID_BASE)
-                                        if (sort != null) {
-                                            onSortChange(sort)
-                                        } else {
-                                            groupedEntries.getOrNull(item.itemId - GROUP_ITEM_ID_BASE)?.let { group ->
-                                                onGroupSelected(group.groupId)
-                                            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp)
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                NgFloatingToolbarBackButton(onClick = onBack)
+                NgSearchBar(
+                    query = query,
+                    onQueryChange = onQueryChange,
+                    hint = stringResource(R.string.search_book_key),
+                    modifier = Modifier.weight(1f),
+                    variant = NgSearchBarVariant.TOOLBAR,
+                    containerColor = Color.Transparent,
+                    hideHintOnFocus = true
+                )
+                Spacer(Modifier.width(8.dp))
+                Box {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { filterMenuState.onAnchorClick() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_screen),
+                            contentDescription = stringResource(R.string.screen),
+                            tint = if (filterActive || filterMenuState.expanded) {
+                                activeActionColor
+                            } else {
+                                actionContentColor
+                            },
+                            modifier = Modifier.size(14.dp)
+                        )
+                    }
+                    NgExpandableActionMenu(
+                        expanded = filterMenuState.expanded,
+                        onDismissRequest = filterMenuState::onDismissRequest,
+                        items = filterMenuItems,
+                        defaultExpandedItemIds = setOf(FILTER_GROUP_PARENT_ITEM_ID),
+                        variant = NgExpandableActionMenuVariant.SIDE_SLIDE,
+                        width = 172.dp,
+                        menuContainerColor = colorResource(R.color.ng_surface_card),
+                        properties = PopupProperties(
+                            focusable = true,
+                            clippingEnabled = false
+                        ),
+                        onItemClick = { item ->
+                            filterMenuState.close()
+                            when (item.itemId) {
+                                ALL_GROUP_ITEM_ID -> onResetFilter()
+                                UNGROUPED_GROUP_ITEM_ID -> onGroupSelected(BookGroup.IdNoGroup)
+                                else -> {
+                                    val typeFilter = BookshelfManageTypeFilter.entries.getOrNull(
+                                        item.itemId - FILTER_TYPE_ITEM_ID_BASE
+                                    )
+                                    if (typeFilter != null) {
+                                        onTypeFilterSelected(typeFilter)
+                                    } else {
+                                        groupedEntries.getOrNull(item.itemId - GROUP_ITEM_ID_BASE)?.let { group ->
+                                            onGroupSelected(group.groupId)
                                         }
                                     }
                                 }
                             }
+                        }
+                    )
+                }
+                Spacer(Modifier.width(2.dp))
+                Box {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { mainMenuState.onAnchorClick() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_grid_menu),
+                            contentDescription = stringResource(R.string.more),
+                            tint = if (mainMenuState.expanded) activeActionColor else actionContentColor,
+                            modifier = Modifier.size(20.dp)
                         )
                     }
+                    NgExpandableActionMenu(
+                        expanded = mainMenuState.expanded,
+                        onDismissRequest = mainMenuState::onDismissRequest,
+                        items = mainMenuItems,
+                        defaultExpandedItemIds = setOf(SORT_MENU_ITEM_ID),
+                        variant = NgExpandableActionMenuVariant.SIDE_SLIDE,
+                        width = 156.dp,
+                        menuContainerColor = colorResource(R.color.ng_surface_card),
+                        properties = PopupProperties(
+                            focusable = true,
+                            clippingEnabled = false
+                        ),
+                        onItemClick = { item ->
+                            mainMenuState.close()
+                            when (item.itemId) {
+                                R.id.menu_group_manage -> onGroupManage()
+                                else -> {
+                                    BookshelfManageSort.entries.getOrNull(item.itemId - SORT_ITEM_ID_BASE)?.let { sort ->
+                                        onSortChange(sort)
+                                    }
+                                }
+                            }
+                        }
+                    )
                 }
             }
         }

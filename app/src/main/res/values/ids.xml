@@ -97,4 +97,5 @@
     <item name="btn_read_aloud_mini_close" type="id" />
 
     <item name="menu_bookshelf_settings" type="id" />
+    <item name="menu_bookshelf_manage" type="id" />
 </resources>

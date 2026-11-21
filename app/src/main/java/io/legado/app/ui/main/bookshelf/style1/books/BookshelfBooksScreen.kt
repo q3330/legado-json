@@ -32,6 +32,7 @@ import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
@@ -70,10 +71,15 @@ import io.legado.app.help.book.isUpError
 import io.legado.app.help.config.BookshelfLayoutMode
 import io.legado.app.help.config.BookshelfCardStyle
 import io.legado.app.help.config.BookshelfCardAppearanceStore
+import io.legado.app.ui.book.explore.ExploreContentToolbar
+import io.legado.app.ui.book.explore.ExploreShowLayoutMode
 import io.legado.app.ui.design.components.compose.NgBookshelfCardSurface
 import io.legado.app.ui.design.components.compose.NgBookCover
 import io.legado.app.ui.design.components.compose.NgBookshelfUnreadBadge
 import io.legado.app.ui.design.components.compose.NgBookshelfUpdateIndicator
+import io.legado.app.ui.design.components.compose.NgGlassDefaults
+import io.legado.app.ui.design.components.compose.NgGlassSurface
+import io.legado.app.ui.design.components.compose.NgMaterialRole
 import io.legado.app.ui.design.components.compose.NgPullRefreshBox
 import io.legado.app.ui.design.components.compose.NgPullRefreshIndicatorVariant
 import io.legado.app.ui.design.theme.NgTheme
@@ -85,13 +91,14 @@ import io.legado.app.utils.toTimeAgo
 import java.text.NumberFormat
 import java.util.Locale
 
-private val BookshelfGridOuterEdge = 16.dp
+private val BookshelfGridOuterEdge = 10.dp
 private val BookshelfGridItemInternalInset = 8.dp
 private val BookshelfListDetailsGap = 16.dp
 private val BookshelfSummaryIconPadding = 2.dp
 
 @Composable
 internal fun BookshelfBooksScreen(
+    groupName: String,
     books: List<Book>,
     layoutMode: BookshelfLayoutMode,
     columns: Int,
@@ -112,71 +119,111 @@ internal fun BookshelfBooksScreen(
     refreshEnabled: Boolean,
     isRefreshing: Boolean,
     onRefresh: () -> Unit,
+    onLayoutModeChange: (ExploreShowLayoutMode) -> Unit,
     onOpenBook: (Book) -> Unit,
     onOpenBookInfo: (Book) -> Unit,
     onOpenBookActions: (Book) -> Unit,
 ) {
     val gridBackgroundEnabled = layoutMode == BookshelfLayoutMode.GRID && showGridBackground
-    BookshelfGridBackground(
-        enabled = gridBackgroundEnabled,
-        initialBottomInset = bottomInset,
+    val showLayoutMode = remember(layoutMode, columns) {
+        if (layoutMode == BookshelfLayoutMode.GRID) {
+            ExploreShowLayoutMode.gridForColumns(columns)
+        } else {
+            ExploreShowLayoutMode.LIST
+        }
+    }
+    val cardBottomPadding = (bottomInset + 4.dp).coerceAtLeast(8.dp)
+
+    NgGlassSurface(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(start = 14.dp, top = 4.dp, end = 14.dp, bottom = cardBottomPadding),
+        role = NgMaterialRole.CONTENT,
+        liquidCornerRadius = NgTheme.shapes.mediumDp.dp,
+        shape = RoundedCornerShape(NgTheme.shapes.mediumDp.dp),
+        style = NgGlassDefaults.bookDetailStyle(
+            containerColor = colorResource(R.color.ng_surface_card),
+        ),
     ) {
-        NgPullRefreshBox(
-            isRefreshing = isRefreshing && refreshEnabled,
-            onRefresh = onRefresh,
-            modifier = Modifier.fillMaxSize(),
-            enabled = refreshEnabled,
-            showIndicator = refreshEnabled,
-            indicatorVariant = NgPullRefreshIndicatorVariant.SINGLE_SPINNER,
+        ExploreContentToolbar(
+            selectedKindLabel = groupName.ifBlank { stringResource(R.string.bookshelf) },
+            layoutMode = showLayoutMode,
+            onLayoutModeChange = onLayoutModeChange,
+            showPagination = false,
+            trailingSummary = books.size.toString(),
+        )
+        HorizontalDivider(
+            modifier = Modifier.padding(horizontal = 12.dp),
+            thickness = 0.5.dp,
+            color = colorResource(R.color.secondaryText).copy(alpha = 0.12f),
+        )
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
         ) {
-            if (books.isEmpty()) {
-                Text(
-                    text = stringResource(R.string.bookshelf_empty),
-                    modifier = Modifier
-                        .align(Alignment.Center)
-                        .padding(16.dp),
-                    color = Color(NgTheme.colors.onSurface),
-                    fontSize = 14.sp,
-                    textAlign = TextAlign.Center,
-                )
-            } else {
-                when (layoutMode) {
-                    BookshelfLayoutMode.LIST,
-                    BookshelfLayoutMode.COMPACT -> BookshelfBookList(
-                        books = books,
-                        compact = layoutMode == BookshelfLayoutMode.COMPACT,
-                        highlightUnread = showUnread && highlightUnread,
-                        spacing = spacing,
-                        bottomInset = bottomInset,
-                        showLastUpdateTime = showLastUpdateTime,
-                        showReadingProgress = showReadingProgress,
-                        scrollToTopToken = scrollToTopToken,
-                        coverRevision = coverRevision,
-                        lastUpdateTick = lastUpdateTick,
-                        isEInk = isEInk,
-                        updatingBookUrls = updatingBookUrls,
-                        onOpenBook = onOpenBook,
-                        onOpenBookInfo = onOpenBookInfo,
-                        onOpenBookActions = onOpenBookActions,
-                    )
+            BookshelfGridBackground(
+                enabled = gridBackgroundEnabled,
+                initialBottomInset = 12.dp,
+            ) {
+                NgPullRefreshBox(
+                    isRefreshing = isRefreshing && refreshEnabled,
+                    onRefresh = onRefresh,
+                    modifier = Modifier.fillMaxSize(),
+                    enabled = refreshEnabled,
+                    showIndicator = refreshEnabled,
+                    indicatorVariant = NgPullRefreshIndicatorVariant.SINGLE_SPINNER,
+                ) {
+                    if (books.isEmpty()) {
+                        Text(
+                            text = stringResource(R.string.bookshelf_empty),
+                            modifier = Modifier
+                                .align(Alignment.Center)
+                                .padding(16.dp),
+                            color = Color(NgTheme.colors.onSurface),
+                            fontSize = 14.sp,
+                            textAlign = TextAlign.Center,
+                        )
+                    } else {
+                        when (layoutMode) {
+                            BookshelfLayoutMode.LIST,
+                            BookshelfLayoutMode.COMPACT -> BookshelfBookList(
+                                books = books,
+                                compact = layoutMode == BookshelfLayoutMode.COMPACT,
+                                highlightUnread = showUnread && highlightUnread,
+                                spacing = spacing,
+                                bottomInset = 12.dp,
+                                showLastUpdateTime = showLastUpdateTime,
+                                showReadingProgress = showReadingProgress,
+                                scrollToTopToken = scrollToTopToken,
+                                coverRevision = coverRevision,
+                                lastUpdateTick = lastUpdateTick,
+                                isEInk = isEInk,
+                                updatingBookUrls = updatingBookUrls,
+                                onOpenBook = onOpenBook,
+                                onOpenBookInfo = onOpenBookInfo,
+                                onOpenBookActions = onOpenBookActions,
+                            )
 
-                    BookshelfLayoutMode.GRID -> BookshelfBookGrid(
-                        books = books,
-                        columns = columns,
-                        spacing = spacing,
-                        showBookName = showBookName,
-                        coverRadius = coverRadius,
-                        showUnread = showUnread,
-                        bottomInset = if (gridBackgroundEnabled) 0.dp else bottomInset,
-                        scrollToTopToken = scrollToTopToken,
-                        coverRevision = coverRevision,
-                        isEInk = isEInk,
-                        updatingBookUrls = updatingBookUrls,
-                        onOpenBook = onOpenBook,
-                        onOpenBookInfo = onOpenBookInfo,
-                    )
+                            BookshelfLayoutMode.GRID -> BookshelfBookGrid(
+                                books = books,
+                                columns = columns,
+                                spacing = spacing,
+                                showBookName = showBookName,
+                                coverRadius = coverRadius,
+                                showUnread = showUnread,
+                                bottomInset = if (gridBackgroundEnabled) 0.dp else 12.dp,
+                                scrollToTopToken = scrollToTopToken,
+                                coverRevision = coverRevision,
+                                isEInk = isEInk,
+                                updatingBookUrls = updatingBookUrls,
+                                onOpenBook = onOpenBook,
+                                onOpenBookInfo = onOpenBookInfo,
+                            )
 
-                    BookshelfLayoutMode.GROUP_GRID -> Unit
+                            BookshelfLayoutMode.GROUP_GRID -> Unit
+                        }
+                    }
                 }
             }
         }
@@ -327,7 +374,7 @@ private fun BookshelfListBookItem(
         contentPadding = PaddingValues(start = 10.dp, end = 14.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp)
+            .padding(horizontal = 8.dp)
             .height(cardHeight)
             .clip(shape)
             .combinedClickable(

@@ -114,6 +114,7 @@ object PreferKey {
     const val webService = "webService"
     const val mcpService = "mcpService"
     const val mcpPort = "mcpPort"
+    const val mcpLocalOnly = "mcpLocalOnly"
     const val aiEnabled = "aiEnabled"
     const val aiProvidersJson = "aiProvidersJson"
     const val aiActiveProviderId = "aiActiveProviderId"

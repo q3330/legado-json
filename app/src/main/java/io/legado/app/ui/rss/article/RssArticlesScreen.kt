@@ -40,6 +40,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -62,6 +63,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupProperties
 import io.legado.app.R
 import io.legado.app.data.entities.RssArticle
+import io.legado.app.help.config.AppConfig
+import io.legado.app.help.translate.BookTitleTranslator
+import io.legado.app.help.translate.TranslateConfig
 import io.legado.app.ui.book.explore.ExploreCategoryBubbleShape
 import io.legado.app.ui.book.explore.ExploreCategoryGlyph
 import io.legado.app.ui.book.explore.ExploreLayoutButton
@@ -87,19 +91,25 @@ import io.legado.app.ui.main.explore.sourceTileColor
 import io.legado.app.ui.main.explore.sourceTileContentColor
 import io.legado.app.ui.rss.RssEmptyState
 import io.legado.app.ui.rss.RssRemoteImage
+import kotlinx.coroutines.Dispatchers.IO
+import kotlinx.coroutines.withContext
 
 internal fun rssArticleStyleToLayoutMode(articleStyle: Int): ExploreShowLayoutMode =
     when (articleStyle) {
+        5 -> ExploreShowLayoutMode.GRID_1
         2, 3 -> ExploreShowLayoutMode.GRID_2
         4 -> ExploreShowLayoutMode.GRID
+        6 -> ExploreShowLayoutMode.GRID_4
         else -> ExploreShowLayoutMode.LIST
     }
 
 internal fun layoutModeToRssArticleStyle(mode: ExploreShowLayoutMode): Int =
     when (mode) {
         ExploreShowLayoutMode.LIST -> 0
+        ExploreShowLayoutMode.GRID_1 -> 5
         ExploreShowLayoutMode.GRID_2 -> 2
         ExploreShowLayoutMode.GRID -> 4
+        ExploreShowLayoutMode.GRID_4 -> 6
     }
 
 @Composable
@@ -427,10 +437,39 @@ internal fun RssShowContentCard(
     val categoryPanelVisible = categoryVisibility.currentState || categoryVisibility.targetState
     BackHandler(enabled = categoriesExpanded) { onCategoriesExpandedChange(false) }
 
-    val selectedSortLabel = remember(sorts, selectedSort, sourceKey) {
-        sorts.getOrNull(selectedSort)?.first?.takeIf { it.isNotBlank() }
-            ?: sourceKey.ifBlank { "全部" }
+    val translatedSortLabels = remember(sourceKey) { mutableStateMapOf<String, String>() }
+    val autoTranslate = TranslateConfig.enabled
+    LaunchedEffect(autoTranslate, sorts) {
+        if (!autoTranslate) return@LaunchedEffect
+        val labels = sorts.map { it.first.trim() }.filter { it.isNotBlank() }.distinct()
+        labels.forEach { label ->
+            BookTitleTranslator.getCached(label)?.let { translatedSortLabels[label] = it }
+        }
+        val uncached = labels.filter { it !in translatedSortLabels && BookTitleTranslator.needsTranslation(it) }
+        if (uncached.isNotEmpty()) {
+            uncached.chunked(25).forEach { batch ->
+                val result = withContext(IO) { BookTitleTranslator.translateBatch(batch) }
+                if (result.isNotEmpty()) {
+                    translatedSortLabels.putAll(result)
+                }
+            }
+        }
     }
+    val translateSortLabel: (String) -> String = { raw ->
+        val clean = raw.trim()
+        if (autoTranslate && clean.isNotBlank()) {
+            translatedSortLabels[clean] ?: BookTitleTranslator.getCached(clean) ?: clean
+        } else {
+            clean
+        }
+    }
+    var categoryLayoutMode by remember {
+        mutableStateOf(ExploreShowLayoutMode.from(AppConfig.exploreCategoryLayoutMode))
+    }
+
+    val rawSortLabel = sorts.getOrNull(selectedSort)?.first?.takeIf { it.isNotBlank() }
+        ?: sourceKey.ifBlank { "全部" }
+    val selectedSortLabel = translateSortLabel(rawSortLabel)
     val layoutMode = remember(articleStyle) { rssArticleStyleToLayoutMode(articleStyle) }
     val gridState = rememberLazyGridState()
     var pagePickerPage by rememberSaveable { mutableStateOf<Int?>(null) }
@@ -557,6 +596,12 @@ internal fun RssShowContentCard(
                     sourceKey = sourceKey,
                     sorts = sorts,
                     selectedSort = selectedSort,
+                    categoryLayoutMode = categoryLayoutMode,
+                    onCategoryLayoutModeChange = { next ->
+                        categoryLayoutMode = next
+                        AppConfig.exploreCategoryLayoutMode = next.value
+                    },
+                    translateSortLabel = translateSortLabel,
                     onSelectSort = { index ->
                         onSortSelected(index)
                         onCategoriesExpandedChange(false)
@@ -674,72 +719,176 @@ internal fun RssCategoryPanel(
     sourceKey: String,
     sorts: List<Pair<String, String>>,
     selectedSort: Int,
+    categoryLayoutMode: ExploreShowLayoutMode = ExploreShowLayoutMode.GRID_4,
+    onCategoryLayoutModeChange: (ExploreShowLayoutMode) -> Unit = {},
+    translateSortLabel: (String) -> String = { it },
     onSelectSort: (Int) -> Unit,
 ) {
     val defaultLabel = stringResource(R.string.all)
     val scrollState = rememberScrollState()
-    val rows = remember(sorts) { sorts.indices.chunked(4) }
+    val columns = categoryLayoutMode.columns
+    val isList = categoryLayoutMode == ExploreShowLayoutMode.LIST
     val primary = Color(NgTheme.colors.primary)
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(max = 360.dp)
-            .verticalScroll(scrollState)
-            .padding(start = 12.dp, top = 8.dp, end = 12.dp, bottom = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+            .padding(start = 12.dp, top = 6.dp, end = 8.dp, bottom = 10.dp),
     ) {
-        if (rows.isEmpty()) {
-            ExploreStatusRow(text = stringResource(R.string.explore_category_empty))
-        } else {
-            rows.forEach { rowIndices ->
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    rowIndices.forEach { index ->
-                        val sort = sorts[index]
-                        val label = sort.first.trim().ifBlank { defaultLabel }
-                        val compactLabel = if (label.length > 4) "${label.take(4)}…" else label
-                        val selected = index == selectedSort
-                        val tileColorInt = remember(sourceKey, label, index) {
-                            sourceTileColor("$sourceKey#$label#$index")
-                        }
-                        val tileColor = Color(tileColorInt)
-                        val tileContentColor = remember(tileColorInt) {
-                            sourceTileContentColor(tileColorInt)
-                        }
-                        Column(
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(end = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = stringResource(R.string.explore_show_categories),
+                modifier = Modifier.weight(1f).padding(start = 4.dp),
+                color = colorResource(R.color.secondaryText),
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+            )
+            ExploreLayoutModePopupButton(
+                layoutMode = categoryLayoutMode,
+                onLayoutModeChange = onCategoryLayoutModeChange,
+            )
+        }
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 360.dp)
+                .verticalScroll(scrollState)
+                .padding(end = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            if (sorts.isEmpty()) {
+                ExploreStatusRow(text = stringResource(R.string.explore_category_empty))
+            } else if (isList || columns == 1) {
+                sorts.indices.forEach { index ->
+                    val sort = sorts[index]
+                    val label = translateSortLabel(sort.first).ifBlank { defaultLabel }
+                    val selected = index == selectedSort
+                    val tileColorInt = remember(sourceKey, sort.first, index) {
+                        sourceTileColor("$sourceKey#${sort.first}#$index")
+                    }
+                    val tileColor = Color(tileColorInt)
+                    val tileContentColor = remember(tileColorInt) {
+                        sourceTileContentColor(tileColorInt)
+                    }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (selected) primary.copy(alpha = 0.10f) else Color.Transparent)
+                            .clickable { onSelectSort(index) }
+                            .padding(horizontal = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        ExploreCategoryGlyph(
+                            label = label,
+                            background = tileColor,
+                            foreground = tileContentColor,
+                            size = 32.dp,
+                        )
+                        Text(
+                            text = label,
                             modifier = Modifier
                                 .weight(1f)
-                                .height(62.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .clickable { onSelectSort(index) },
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center,
-                        ) {
-                            ExploreCategoryGlyph(
-                                label = label,
-                                background = tileColor,
-                                foreground = tileContentColor,
-                                size = 36.dp,
-                            )
-                            Spacer(Modifier.height(2.dp))
-                            Text(
-                                text = compactLabel,
-                                color = if (selected) primary else colorResource(R.color.primaryText),
-                                fontSize = 12.sp,
-                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                textAlign = TextAlign.Center,
-                                lineHeight = 13.sp,
-                            )
-                        }
+                                .padding(start = 10.dp, end = 4.dp),
+                            color = if (selected) primary else colorResource(R.color.primaryText),
+                            fontSize = 14.sp,
+                            lineHeight = 17.sp,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
-                    if (rowIndices.size < 4) {
-                        Spacer(Modifier.weight((4 - rowIndices.size).toFloat()))
+                }
+            } else {
+                sorts.indices.chunked(columns).forEach { rowIndices ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        rowIndices.forEach { index ->
+                            val sort = sorts[index]
+                            val label = translateSortLabel(sort.first).ifBlank { defaultLabel }
+                            val selected = index == selectedSort
+                            val tileColorInt = remember(sourceKey, sort.first, index) {
+                                sourceTileColor("$sourceKey#${sort.first}#$index")
+                            }
+                            val tileColor = Color(tileColorInt)
+                            val tileContentColor = remember(tileColorInt) {
+                                sourceTileContentColor(tileColorInt)
+                            }
+                            if (columns <= 2) {
+                                Row(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(52.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(if (selected) primary.copy(alpha = 0.10f) else Color.Transparent)
+                                        .clickable { onSelectSort(index) }
+                                        .padding(horizontal = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    ExploreCategoryGlyph(
+                                        label = label,
+                                        background = tileColor,
+                                        foreground = tileContentColor,
+                                        size = 30.dp,
+                                    )
+                                    Text(
+                                        text = label,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .padding(start = 8.dp, end = 2.dp),
+                                        color = if (selected) primary else colorResource(R.color.primaryText),
+                                        fontSize = 13.sp,
+                                        lineHeight = 16.sp,
+                                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            } else {
+                                Column(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(68.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(if (selected) primary.copy(alpha = 0.10f) else Color.Transparent)
+                                        .clickable { onSelectSort(index) }
+                                        .padding(horizontal = 4.dp, vertical = 4.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.Center,
+                                ) {
+                                    ExploreCategoryGlyph(
+                                        label = label,
+                                        background = tileColor,
+                                        foreground = tileContentColor,
+                                        size = if (columns == 3) 34.dp else 32.dp,
+                                    )
+                                    Spacer(Modifier.height(3.dp))
+                                    Text(
+                                        text = label,
+                                        color = if (selected) primary else colorResource(R.color.primaryText),
+                                        fontSize = if (columns == 3) 12.sp else 11.sp,
+                                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                        textAlign = TextAlign.Center,
+                                        lineHeight = 13.sp,
+                                    )
+                                }
+                            }
+                        }
+                        if (rowIndices.size < columns) {
+                            Spacer(Modifier.weight((columns - rowIndices.size).toFloat()))
+                        }
                     }
                 }
             }
@@ -906,7 +1055,14 @@ private fun RssArticleGridCard(
             contentDescription = article.title,
             modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(if (columns == 2) 1.32f else 1.0f)
+                .aspectRatio(
+                    when (columns) {
+                        1 -> 1.55f
+                        2 -> 1.32f
+                        4 -> 0.92f
+                        else -> 1.0f
+                    }
+                )
                 .clip(RoundedCornerShape(6.dp)),
         )
         Spacer(Modifier.height(6.dp))

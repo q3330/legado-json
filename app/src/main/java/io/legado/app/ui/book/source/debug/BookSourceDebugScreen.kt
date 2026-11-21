@@ -97,6 +97,7 @@ internal fun BookSourceDebugScreen(
     onTocClick: () -> Unit,
     onContentClick: () -> Unit,
     onPhaseClick: (BookSourceDebugTimelineState.DebugItem.Phase) -> Unit,
+    onAiRepair: () -> Unit = {},
 ) {
     var showExploreSelector by remember { mutableStateOf(false) }
     val focusRequester = remember { FocusRequester() }
@@ -138,10 +139,17 @@ internal fun BookSourceDebugScreen(
                 onContentClick = onContentClick,
             )
         } else if (timelineItems.isNotEmpty()) {
+            val failedPhase = timelineItems
+                .filterIsInstance<BookSourceDebugTimelineState.DebugItem.Phase>()
+                .firstOrNull { it.status == BookSourceDebugTimelineState.StepStatus.Error }
             BookSourceDebugTimeline(
                 items = timelineItems,
                 onPhaseClick = onPhaseClick,
                 modifier = Modifier.weight(1f),
+            )
+            BookSourceDebugAiRepairBar(
+                failedPhaseTitle = failedPhase?.title,
+                onClick = onAiRepair,
             )
         }
     }
@@ -279,6 +287,12 @@ private fun bookSourceDebugMenuItems(): List<NgExpandableActionMenuItem> {
             R.id.menu_content_src,
             R.string.content_src,
             R.drawable.ic_code,
+        ),
+        NgExpandableActionMenuItem(
+            R.id.menu_ai_repair,
+            R.string.book_source_debug_ai_repair,
+            R.drawable.ic_ai,
+            dividerBefore = true,
         ),
         NgExpandableActionMenuItem(
             R.id.menu_network_log,
@@ -440,6 +454,46 @@ private fun BookSourceDebugTimeline(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun BookSourceDebugAiRepairBar(
+    failedPhaseTitle: String?,
+    onClick: () -> Unit,
+) {
+    val isError = !failedPhaseTitle.isNullOrBlank()
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(colorResource(R.color.ng_surface_card))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        NgStatusTag(
+            text = if (isError) "调试异常" else "AI 助手",
+            variant = if (isError) NgStatusTagVariant.ERROR else NgStatusTagVariant.PRIMARY,
+            style = NgStatusTagStyle.REGULAR,
+        )
+        Text(
+            text = if (isError) {
+                "【$failedPhaseTitle】阶段失败，点击一键召唤 AI 解析并修复"
+            } else {
+                "带入当前书源与调试日志，一键召唤 AI 解析或优化规则"
+            },
+            modifier = Modifier.weight(1f),
+            color = Color(NgTheme.colors.onSurface),
+            fontSize = 13.sp,
+            lineHeight = 17.sp,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        NgActionChip(
+            text = stringResource(R.string.book_source_debug_ai_repair),
+            onClick = onClick,
+        )
     }
 }
 

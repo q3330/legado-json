@@ -32,6 +32,7 @@ import io.legado.app.help.coroutine.Coroutine
 import io.legado.app.help.gsyVideo.ExoVideoManager
 import io.legado.app.help.gsyVideo.ExoVideoManager.Companion.FULLSCREEN_ID
 import io.legado.app.help.gsyVideo.FloatingPlayer
+import io.legado.app.help.gsyVideo.VideoDownloadCache
 import io.legado.app.help.gsyVideo.VideoPlaybackTarget
 import io.legado.app.help.gsyVideo.VideoPlayer
 import io.legado.app.help.source.SourceInteractionPolicy
@@ -88,12 +89,20 @@ object VideoPlay : CoroutineScope by MainScope(){
         set(value) {
             videoPrefs.edit { putBoolean("fullBottomProgressBar", value) }
         }
+    /**  视频画面比例模式  **/
+    var aspectMode: String
+        get() = videoPrefs.getString("aspectMode", "FIT") ?: "FIT"
+        set(value) {
+            videoPrefs.edit { putString("aspectMode", value) }
+        }
     /**  弹幕滚动速度  **/
     var danmakuSpeed = 1.2f
     /**  锁屏  **/
     var lockCurScreen = false
     /**  竖屏视频  **/
     var isPortraitVideo = false
+    /**  当前是否正在播放本地已缓存的离线视频  **/
+    var isPlayingCachedVideo = false
 
     val videoManager by lazy { ExoVideoManager() }
     private var isLoading = false
@@ -145,7 +154,7 @@ object VideoPlay : CoroutineScope by MainScope(){
     fun startPlay(player: StandardGSYVideoPlayer) = startPlay(legacyTarget(player))
 
     fun startPlay(player: VideoPlaybackTarget) {
-        if (source == null) return
+        if (source == null && !VideoDownloadCache.isCached(book, chapter, videoUrl)) return
         danmakuStr = null
         danmakuFile = null
         stopLoading()
@@ -153,6 +162,21 @@ object VideoPlay : CoroutineScope by MainScope(){
         player.loading()
         if (singleUrl) {
             val mUrl = videoUrl ?: return
+            val cachedSingle = VideoDownloadCache.getCachedVideoFile(book, null, mUrl)
+            if (cachedSingle != null) {
+                isPlayingCachedVideo = true
+                val localUrl = Uri.fromFile(cachedSingle).toString()
+                videoUrl = localUrl
+                CacheManager.getLong(VIDEO_POS_NAME + mUrl)?.let {
+                    player.seekOnStart = it
+                }
+                player.mapHeadData = emptyMap()
+                player.setUp(localUrl, false, null, videoTitle)
+                player.startPlayLogic()
+                postEvent(EventBus.UP_VIDEO_INFO, arrayListOf(2))
+                return
+            }
+            isPlayingCachedVideo = false
             Coroutine.async(loadScope, IO) {
                 CacheManager.getLong(VIDEO_POS_NAME + mUrl)?.let {
                     player.seekOnStart = it
@@ -274,6 +298,23 @@ object VideoPlay : CoroutineScope by MainScope(){
             appCtx.toastOnUi("未找到章节")
             return
         }
+        val cachedEpisodeFile = VideoDownloadCache.getCachedVideoFile(book, chapter, videoUrl)
+        if (cachedEpisodeFile != null) {
+            isPlayingCachedVideo = true
+            val localUrl = Uri.fromFile(cachedEpisodeFile).toString()
+            videoUrl = localUrl
+            when (val danmaku = chapter.getDanmaku()) {
+                is String -> danmakuStr = danmaku
+                is File -> danmakuFile = danmaku
+            }
+            player.mapHeadData = emptyMap()
+            player.setUp(localUrl, false, null, chapter.title)
+            player.startPlayLogic()
+            isLoading = false
+            postEvent(EventBus.UP_VIDEO_INFO, arrayListOf(2))
+            return
+        }
+        isPlayingCachedVideo = false
         val interactionPolicy = SourceInteractionPolicy(
             blockDialogs = false,
             blockMediaLaunches = true,
@@ -293,6 +334,7 @@ object VideoPlay : CoroutineScope by MainScope(){
                     capturedBrowserUrl = interactionPolicy.blockedRequest?.url,
                 )
                 videoUrl = mUrl
+                postEvent(EventBus.UP_VIDEO_INFO, arrayListOf(0))
                 val analyzeUrl = AnalyzeUrl(
                     mUrl,
                     source = source,
@@ -324,7 +366,7 @@ object VideoPlay : CoroutineScope by MainScope(){
         RegexOption.IGNORE_CASE,
     )
 
-    private fun resolvePlayableVideoUrl(
+    internal fun resolvePlayableVideoUrl(
         rawContent: String,
         capturedBrowserUrl: String?,
     ): String {
@@ -416,6 +458,7 @@ object VideoPlay : CoroutineScope by MainScope(){
             danmakuFile = null
             lockCurScreen = false
             isPortraitVideo = false
+            isPlayingCachedVideo = false
             release()
             if (needClearTemp) {
                 needClearTemp = false
@@ -519,7 +562,7 @@ object VideoPlay : CoroutineScope by MainScope(){
             SourceCallBack.callBackBook(SourceCallBack.START_READ, source as BookSource?, b, chapter)
         }
         upEpisodes()
-        if (source == null) {
+        if (source == null && !VideoDownloadCache.isCached(book, episodes?.getOrNull(chapterInVolumeIndex), videoUrl)) {
             appCtx.toastOnUi("未找到源")
             return false
         }

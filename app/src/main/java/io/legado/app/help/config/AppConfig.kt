@@ -564,9 +564,15 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         }
 
     var exploreShowLayoutMode: Int
-        get() = appCtx.getPrefInt(PreferKey.exploreShowLayoutMode, 0).coerceIn(0, 2)
+        get() = appCtx.getPrefInt(PreferKey.exploreShowLayoutMode, 0).coerceIn(0, 4)
         set(value) {
-            appCtx.putPrefInt(PreferKey.exploreShowLayoutMode, value.coerceIn(0, 2))
+            appCtx.putPrefInt(PreferKey.exploreShowLayoutMode, value.coerceIn(0, 4))
+        }
+
+    var exploreCategoryLayoutMode: Int
+        get() = appCtx.getPrefInt("exploreCategoryLayoutMode", 4).coerceIn(0, 4)
+        set(value) {
+            appCtx.putPrefInt("exploreCategoryLayoutMode", value.coerceIn(0, 4))
         }
 
     var bookSourceDedupeMode: Int
@@ -793,6 +799,12 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         get() = appCtx.getPrefInt(PreferKey.mcpPort, 1124)
         set(value) {
             appCtx.putPrefInt(PreferKey.mcpPort, value)
+        }
+
+    var mcpLocalOnly: Boolean
+        get() = appCtx.getPrefBoolean(PreferKey.mcpLocalOnly, false)
+        set(value) {
+            appCtx.putPrefBoolean(PreferKey.mcpLocalOnly, value)
         }
 
     var tocUiUseReplace: Boolean

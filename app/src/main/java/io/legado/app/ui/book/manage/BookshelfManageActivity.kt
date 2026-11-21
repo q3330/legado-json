@@ -34,6 +34,7 @@ import io.legado.app.model.localBook.canExtractOriginalCover
 import io.legado.app.model.localBook.localBookCoverUpdates
 import io.legado.app.model.localBook.rebuildBookCovers
 import io.legado.app.service.ExportBookService
+import io.legado.app.ui.book.changecover.ChangeCoverDialog
 import io.legado.app.ui.book.group.GroupManageDialog
 import io.legado.app.ui.book.info.BookInfoActivity
 import io.legado.app.ui.design.theme.NgAppTheme
@@ -65,7 +66,8 @@ import kotlin.math.max
 class BookshelfManageActivity :
     VMBaseActivity<ComposeActivityBinding, BookshelfManageViewModel>(),
     SourcePickerDialog.Callback,
-    ExportSettingsDialog.Callback {
+    ExportSettingsDialog.Callback,
+    ChangeCoverDialog.CallBack {
 
     override val binding by viewBinding(ComposeActivityBinding::inflate)
     override val viewModel by viewModels<BookshelfManageViewModel>()
@@ -79,6 +81,8 @@ class BookshelfManageActivity :
     private var topBarQuery by mutableStateOf("")
     private var topBarGroups by mutableStateOf<List<BookGroup>>(emptyList())
     private var topBarSelectedGroupId by mutableLongStateOf(BookGroup.IdAll)
+    private var selectedTypeFilter by mutableStateOf<BookshelfManageTypeFilter?>(null)
+    private var pendingCoverBook: Book? = null
     private var books: List<Book> = emptyList()
     private var visibleBooks by mutableStateOf<List<Book>>(
         emptyList(),
@@ -172,12 +176,12 @@ class BookshelfManageActivity :
                     query = topBarQuery,
                     groups = topBarGroups,
                     selectedGroupId = topBarSelectedGroupId,
+                    selectedTypeFilter = selectedTypeFilter,
                     books = visibleBooks,
                     selectedBookUrls = selectedBookUrls,
                     cachedChapterCounts = cachedChapterCounts,
                     cacheChapterTotals = cacheChapterTotals,
                     clearableBookUrls = clearableBookUrls,
-                    cachedBytes = cachedBytes,
                     sortOrder = sortOrder,
                     coverUpdateSelection = coverUpdateSelection,
                     deleteDialogVisible = deleteDialogVisible,
@@ -190,6 +194,26 @@ class BookshelfManageActivity :
                         updateVisibleBooks()
                     },
                     onBack = ::finish,
+                    onResetFilter = {
+                        selectedTypeFilter = null
+                        if (viewModel.groupId != BookGroup.IdAll) {
+                            viewModel.groupId = BookGroup.IdAll
+                            topBarSelectedGroupId = BookGroup.IdAll
+                            upBookDataByGroupId()
+                        } else {
+                            updateVisibleBooks()
+                        }
+                    },
+                    onTypeFilterSelected = { typeFilter ->
+                        selectedTypeFilter = typeFilter
+                        if (viewModel.groupId != BookGroup.IdAll) {
+                            viewModel.groupId = BookGroup.IdAll
+                            topBarSelectedGroupId = BookGroup.IdAll
+                            upBookDataByGroupId()
+                        } else {
+                            updateVisibleBooks()
+                        }
+                    },
                     onGroupSelected = { groupId ->
                         viewModel.groupId = groupId
                         topBarSelectedGroupId = groupId
@@ -203,11 +227,19 @@ class BookshelfManageActivity :
                     },
                     onSelectionChange = ::setBookSelected,
                     onOpenDetails = ::openBook,
+                    onSwipeDelete = ::swipeDeleteBook,
+                    onDownloadBook = { book ->
+                        cacheBook(book, 0, book.lastChapterIndex)
+                        toastOnUi("开始下载：${book.name}")
+                    },
+                    onExportBook = { book -> showExportSettings(listOf(book)) },
+                    onGroupBook = { book -> BookshelfBookGroupSheet(this, listOf(book)).show() },
+                    onFetchCover = ::fetchBookCover,
                     onReorderStarted = ::prepareManualSort,
                     onMove = ::moveBook,
                     onReorderFinished = ::finishDrag,
                     onSelectAll = ::selectAll,
-                    onInvertSelection = ::invertSelection,
+                    onClearSelection = { selectedBookUrls = emptySet() },
                     onDockAction = ::onDockAction,
                     onDismissCoverUpdate = { coverUpdateSelection = null },
                     onConfirmCoverUpdate = {
@@ -274,10 +306,10 @@ class BookshelfManageActivity :
     }
 
     private fun updateVisibleBooks() {
-        val matching = if (topBarQuery.isEmpty()) {
-            books
-        } else {
-            books.filter { it.contains(topBarQuery) }
+        val typeFilter = selectedTypeFilter
+        val matching = books.filter { book ->
+            (typeFilter == null || typeFilter.matches(book)) &&
+                (topBarQuery.isEmpty() || book.contains(topBarQuery))
         }
         visibleBooks = matching.sortedForBookshelfManage(
             sort = sortOrder,
@@ -381,6 +413,29 @@ class BookshelfManageActivity :
         if (selected.isEmpty()) return
         LocalConfig.deleteBookOriginal = deleteOriginal
         viewModel.deleteBook(selected, deleteOriginal)
+    }
+
+    private fun swipeDeleteBook(book: Book) {
+        selectedBookUrls = selectedBookUrls - book.bookUrl
+        viewModel.deleteBook(listOf(book), LocalConfig.deleteBookOriginal)
+        toastOnUi("已删除：${book.name}")
+    }
+
+    private fun fetchBookCover(book: Book) {
+        if (canExtractOriginalCover(book)) {
+            updateBookCovers(listOf(book))
+        } else {
+            pendingCoverBook = book
+            showDialogFragment(ChangeCoverDialog(book))
+        }
+    }
+
+    override fun coverChangeTo(coverUrl: String) {
+        val target = pendingCoverBook ?: return
+        pendingCoverBook = null
+        target.customCoverUrl = coverUrl
+        viewModel.updateBook(target)
+        toastOnUi("已更新封面：${target.name}")
     }
 
     private fun clearSelectedBookGroups(books: List<Book>) {

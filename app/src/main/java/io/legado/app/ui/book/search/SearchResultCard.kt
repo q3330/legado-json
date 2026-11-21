@@ -102,6 +102,7 @@ internal fun SearchResultCard(
     cardStrokeColorRes: Int = R.color.ng_settings_item_stroke,
     cardBorderWidth: Dp = 0.8.dp,
     coverBitmapCache: SearchCoverBitmapCache? = null,
+    displayTitle: String? = null,
 ) {
     val context = LocalContext.current
     val interactionSource = remember { MutableInteractionSource() }
@@ -157,7 +158,7 @@ internal fun SearchResultCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = book.name,
+                    text = displayTitle?.takeIf { it.isNotBlank() } ?: book.name,
                     modifier = Modifier.weight(1f),
                     color = primaryText,
                     fontSize = 16.sp,
@@ -308,6 +309,7 @@ internal fun SearchBookCover(
     bitmapCache: SearchCoverBitmapCache? = null,
 ) {
     val context = LocalContext.current
+    val appContext = remember(context) { context.applicationContext }
     val density = LocalDensity.current
     val widthPx = with(density) { coverWidth.roundToPx() }
     val heightPx = with(density) { coverHeight.roundToPx() }
@@ -333,7 +335,7 @@ internal fun SearchBookCover(
     }
 
     DisposableEffect(
-        context,
+        appContext,
         book.coverUrl,
         book.origin,
         defaultSeed,
@@ -364,12 +366,14 @@ internal fun SearchBookCover(
                 override fun onLoadCleared(placeholder: Drawable?) = Unit
             }
             BookCover.load(
-                context = context,
+                context = appContext,
                 path = book.coverUrl,
                 loadOnlyWifi = AppConfig.loadCoverOnlyWifi,
                 sourceOrigin = book.origin
             ).override(widthPx, heightPx).into(target)
-            onDispose { Glide.with(context).clear(target) }
+            onDispose {
+                runCatching { Glide.with(appContext).clear(target) }
+            }
         }
     }
 
