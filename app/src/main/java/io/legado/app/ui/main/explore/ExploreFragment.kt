@@ -832,6 +832,17 @@ class ExploreFragment() : Fragment(), MainFragmentInterface {
         (activity as? MainActivity)?.resolveFloatingBottomContentInset {
             bottomInsetPx = it
         }
+        val persistedLayoutMode = io.legado.app.ui.book.explore.ExploreShowLayoutMode.from(
+            AppConfig.exploreShowLayoutMode
+        )
+        if (modernState.layoutMode != persistedLayoutMode ||
+            modernState.autoTranslateEnabled != TranslateConfig.enabled
+        ) {
+            modernState = modernState.copy(
+                layoutMode = persistedLayoutMode,
+                autoTranslateEnabled = TranslateConfig.enabled,
+            )
+        }
         val currentDedupeMode = AppConfig.bookSourceDedupeMode
         if (currentDedupeMode != appliedDedupeMode) {
             appliedDedupeMode = currentDedupeMode

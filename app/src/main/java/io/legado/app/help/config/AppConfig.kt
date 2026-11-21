@@ -564,9 +564,9 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
         }
 
     var exploreShowLayoutMode: Int
-        get() = appCtx.getPrefInt(PreferKey.exploreShowLayoutMode, 0).coerceIn(0, 1)
+        get() = appCtx.getPrefInt(PreferKey.exploreShowLayoutMode, 0).coerceIn(0, 2)
         set(value) {
-            appCtx.putPrefInt(PreferKey.exploreShowLayoutMode, value.coerceIn(0, 1))
+            appCtx.putPrefInt(PreferKey.exploreShowLayoutMode, value.coerceIn(0, 2))
         }
 
     var bookSourceDedupeMode: Int
