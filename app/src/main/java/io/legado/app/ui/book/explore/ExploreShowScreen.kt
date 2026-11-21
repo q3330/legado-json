@@ -62,8 +62,10 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.PopupProperties
 import io.legado.app.R
 import io.legado.app.data.entities.BookSource
 import io.legado.app.data.entities.SearchBook
@@ -75,6 +77,7 @@ import io.legado.app.ui.book.search.SearchResultCard
 import io.legado.app.ui.design.components.compose.NgExpandableActionMenu
 import io.legado.app.ui.design.components.compose.rememberNgExpandableActionMenuContentWidth
 import io.legado.app.ui.design.components.compose.NgExpandableActionMenuItem
+import io.legado.app.ui.design.components.compose.NgExpandableActionMenuVariant
 import io.legado.app.ui.design.components.compose.NgMenuSelectionStyle
 import io.legado.app.ui.design.components.compose.NgPopupToggleState
 import io.legado.app.ui.design.components.compose.NgGlassDefaults
@@ -102,6 +105,7 @@ internal fun ExploreShowScreen(
     layoutMode: ExploreShowLayoutMode,
     onBack: () -> Unit,
     onRefresh: () -> Unit,
+    onToggleAutoTranslate: () -> Unit,
     onRefreshKinds: () -> Unit,
     onSelectKind: (ExploreKind) -> Unit,
     onLayoutModeChange: (ExploreShowLayoutMode) -> Unit,
@@ -111,6 +115,77 @@ internal fun ExploreShowScreen(
     onRetryContent: () -> Unit,
     onOpenBook: (SearchBook) -> Unit,
     onShowError: (String) -> Unit
+) {
+    var categoriesExpanded by rememberSaveable(state.source?.bookSourceUrl) { mutableStateOf(false) }
+    var categoryAnchorX by remember { mutableStateOf<Float?>(null) }
+
+    LaunchedEffect(state.kindsError) {
+        if (state.kindsError != null) categoriesExpanded = true
+    }
+
+    NgPullRefreshBox(
+        isRefreshing = state.isRefreshing,
+        onRefresh = onRefresh,
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding(),
+        enabled = !state.isKindsLoading,
+        showIndicator = false
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            ExploreShowTopBar(
+                sourceName = state.sourceName,
+                isLoading = state.isKindsLoading && !state.isRefreshing,
+                autoTranslateEnabled = state.autoTranslateEnabled,
+                onBack = onBack,
+                onToggleAutoTranslate = onToggleAutoTranslate,
+                onRefresh = onRefresh,
+                categoriesExpanded = categoriesExpanded,
+                onToggleCategories = { categoriesExpanded = !categoriesExpanded },
+                onCategoryAnchorPosition = { categoryAnchorX = it }
+            )
+
+            ExploreShowContentCard(
+                state = state,
+                layoutMode = layoutMode,
+                categoriesExpanded = categoriesExpanded,
+                onCategoriesExpandedChange = { categoriesExpanded = it },
+                categoryAnchorX = categoryAnchorX,
+                onRefreshKinds = onRefreshKinds,
+                onSelectKind = onSelectKind,
+                onLayoutModeChange = onLayoutModeChange,
+                onSelectPage = onSelectPage,
+                onJumpToPage = onJumpToPage,
+                onLoadNext = onLoadNext,
+                onRetryContent = onRetryContent,
+                onOpenBook = onOpenBook,
+                onShowError = onShowError,
+                modifier = Modifier.weight(1f)
+            )
+        }
+    }
+}
+
+@Composable
+internal fun ExploreShowContentCard(
+    state: ExploreShowUiState,
+    layoutMode: ExploreShowLayoutMode,
+    categoriesExpanded: Boolean,
+    onCategoriesExpandedChange: (Boolean) -> Unit,
+    categoryAnchorX: Float?,
+    onRefreshKinds: () -> Unit,
+    onSelectKind: (ExploreKind) -> Unit,
+    onLayoutModeChange: (ExploreShowLayoutMode) -> Unit,
+    onSelectPage: (Int) -> Unit,
+    onJumpToPage: (Int) -> Unit,
+    onLoadNext: () -> Unit,
+    onRetryContent: () -> Unit,
+    onOpenBook: (SearchBook) -> Unit,
+    onShowError: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    cardBottomPadding: Dp = 8.dp,
+    bottomContentPadding: Dp = 24.dp,
+    useNavigationBarsPadding: Boolean = true,
 ) {
     val kindSections = remember(state.kinds) { buildExploreKindSections(state.kinds) }
     val activeSectionIndex = kindSections.sectionIndexFor(state.selectedKind)
@@ -130,16 +205,12 @@ internal fun ExploreShowScreen(
     val currentPage by remember(gridState, state.bookPages, state.firstLoadedPage) {
         derivedStateOf {
             val visibleBooks = gridState.layoutInfo.visibleItemsInfo.mapNotNull { item ->
-                // Items visible only in the leading content padding can belong to the
-                // previous page even after scrollToItem has reached the next page.
                 if (item.index < gridState.firstVisibleItemIndex) return@mapNotNull null
                 val key = item.key as? String
                 val page = key?.removePrefix("list_")?.removePrefix("grid_")
                     ?.let(state.bookPages::get)
                 page?.let { item.offset.y to it }
             }
-            // A grid row may straddle two source pages. Use its later page so
-            // navigating to a cached boundary cannot get stuck on the same row.
             val firstRow = visibleBooks.firstOrNull()?.first
             visibleBooks.takeWhile { it.first == firstRow }.maxOfOrNull { it.second }
                 ?: state.firstLoadedPage
@@ -160,9 +231,7 @@ internal fun ExploreShowScreen(
             }
         }
     }
-    val columns = if (layoutMode == ExploreShowLayoutMode.LIST) 1 else 3
-    var categoriesExpanded by rememberSaveable(state.source?.bookSourceUrl) { mutableStateOf(false) }
-    var categoryAnchorX by remember { mutableStateOf<Float?>(null) }
+    val columns = layoutMode.columns
     var categoryPanelLeft by remember { mutableStateOf(0f) }
     val categoryCorner = NgTheme.shapes.mediumDp.dp
     val categoryShape = remember(categoryAnchorX, categoryPanelLeft, categoryCorner) {
@@ -171,10 +240,10 @@ internal fun ExploreShowScreen(
     val categoryVisibility = remember { MutableTransitionState(false) }
     categoryVisibility.targetState = categoriesExpanded
     val categoryPanelVisible = categoryVisibility.currentState || categoryVisibility.targetState
-    BackHandler(enabled = categoriesExpanded) { categoriesExpanded = false }
+    BackHandler(enabled = categoriesExpanded) { onCategoriesExpandedChange(false) }
     val selectKind: (ExploreKind) -> Unit = { kind ->
         onSelectKind(kind)
-        categoriesExpanded = false
+        onCategoriesExpandedChange(false)
     }
     val shouldLoadNext by remember(gridState, state.books, state.hasMore, state.isContentLoading, state.contentError) {
         derivedStateOf {
@@ -186,9 +255,6 @@ internal fun ExploreShowScreen(
         }
     }
 
-    LaunchedEffect(state.kindsError) {
-        if (state.kindsError != null) categoriesExpanded = true
-    }
     LaunchedEffect(shouldLoadNext) {
         if (shouldLoadNext) onLoadNext()
     }
@@ -198,196 +264,190 @@ internal fun ExploreShowScreen(
         }
     }
 
-    NgPullRefreshBox(
-        isRefreshing = state.isRefreshing,
-        onRefresh = onRefresh,
-        modifier = Modifier
-            .fillMaxSize()
-            .statusBarsPadding(),
-        enabled = !state.isKindsLoading,
-        showIndicator = false
-    ) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            ExploreShowTopBar(
-                sourceName = state.sourceName,
-                isLoading = state.isKindsLoading && !state.isRefreshing,
-                onBack = onBack,
-                onRefresh = onRefresh,
-                categoriesExpanded = categoriesExpanded,
-                onToggleCategories = { categoriesExpanded = !categoriesExpanded },
-                onCategoryAnchorPosition = { categoryAnchorX = it }
+    Box(modifier = modifier) {
+        NgGlassSurface(
+            modifier = Modifier.fillMaxSize()
+                .then(if (useNavigationBarsPadding) Modifier.navigationBarsPadding() else Modifier)
+                .padding(start = 14.dp, top = 4.dp, end = 14.dp, bottom = cardBottomPadding),
+            role = NgMaterialRole.CONTENT,
+            liquidCornerRadius = NgTheme.shapes.mediumDp.dp,
+            shape = RoundedCornerShape(NgTheme.shapes.mediumDp.dp),
+            style = NgGlassDefaults.bookDetailStyle(
+                containerColor = colorResource(R.color.ng_surface_card)
             )
+        ) {
+            // Keep the header's space while the category overlay is visible.
+            if (categoryPanelVisible) {
+                Spacer(Modifier.fillMaxWidth().height(44.5.dp))
+            } else {
+                ExploreContentToolbar(
+                    selectedKindLabel = state.selectedKind?.title
+                        ?.let(::sanitizeExploreDetailLabel)
+                        .orEmpty(),
+                    page = currentPage,
+                    layoutMode = layoutMode,
+                    onToggleCategories = { onCategoriesExpandedChange(!categoriesExpanded) },
+                    onSelectPage = { onSelectPage(currentPage) },
+                    navigationAvailable = navigationAvailable,
+                    gridState = gridState,
+                    canGoPrevious = currentPage > 1,
+                    canGoNext = currentPage < Int.MAX_VALUE &&
+                        (state.hasMore || currentPage < lastBookPage),
+                    onPrevious = { navigate(currentPage - 1) },
+                    onNext = { navigate(currentPage + 1) },
+                    onLayoutModeChange = onLayoutModeChange
+                )
+                HorizontalDivider(
+                    modifier = Modifier.padding(horizontal = 12.dp),
+                    thickness = 0.5.dp,
+                    color = colorResource(R.color.secondaryText).copy(alpha = 0.12f)
+                )
+            }
 
-            Box(modifier = Modifier.weight(1f)) {
-                NgGlassSurface(
-                    modifier = Modifier.fillMaxSize()
-                        .navigationBarsPadding()
-                        .padding(start = 14.dp, top = 4.dp, end = 14.dp, bottom = 8.dp),
-                    role = NgMaterialRole.CONTENT,
-                    liquidCornerRadius = NgTheme.shapes.mediumDp.dp,
-                    shape = RoundedCornerShape(NgTheme.shapes.mediumDp.dp),
-                    style = NgGlassDefaults.bookDetailStyle(
-                        containerColor = colorResource(R.color.ng_surface_card)
-                    )
-                ) {
-                    // Keep the header's space while the category overlay is visible.
-                    if (categoryPanelVisible) {
-                        Spacer(Modifier.fillMaxWidth().height(44.5.dp))
-                    } else {
-                        ExploreContentToolbar(
-                            selectedKindLabel = state.selectedKind?.title
-                                ?.let(::sanitizeExploreDetailLabel)
-                                .orEmpty(),
-                            page = currentPage,
-                            layoutMode = layoutMode,
-                            onSelectPage = { onSelectPage(currentPage) },
-                            navigationAvailable = navigationAvailable,
-                            gridState = gridState,
-                            canGoPrevious = currentPage > 1,
-                            canGoNext = currentPage < Int.MAX_VALUE &&
-                                (state.hasMore || currentPage < lastBookPage),
-                            onPrevious = { navigate(currentPage - 1) },
-                            onNext = { navigate(currentPage + 1) },
-                            onLayoutModeChange = onLayoutModeChange
-                        )
-                        HorizontalDivider(
-                            modifier = Modifier.padding(horizontal = 12.dp),
-                            thickness = 0.5.dp,
-                            color = colorResource(R.color.secondaryText).copy(alpha = 0.12f)
-                        )
-                    }
-
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(columns),
-                        state = gridState,
-                        modifier = Modifier.weight(1f),
-                        contentPadding = PaddingValues(
-                            start = 8.dp,
-                            top = 8.dp,
-                            end = 8.dp,
-                            bottom = 24.dp
-                        ),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(
-                            if (layoutMode == ExploreShowLayoutMode.LIST) 0.dp else 16.dp
-                        )
-                    ) {
-                        if (layoutMode == ExploreShowLayoutMode.LIST) {
-                            items(
-                                items = state.books,
-                                key = { "list_${it.bookUrl}" },
-                                span = { GridItemSpan(maxLineSpan) }
-                            ) { book ->
-                                Column {
-                                    SearchResultCard(
-                                        book = book,
-                                        inBookshelf = state.isBookInShelf(book),
-                                        originCount = 0,
-                                        onClick = { onOpenBook(book) },
-                                        onLongClick = { onOpenBook(book) },
-                                        outerHorizontalPadding = 0.dp,
-                                        outerVerticalPadding = 0.dp,
-                                        cardCornerRadius = 0.dp,
-                                        cardContentPadding = 8.dp,
-                                        cardBackgroundColorRes = android.R.color.transparent,
-                                        cardBorderWidth = 0.dp,
-                                        coverBitmapCache = coverBitmapCache,
-                                    )
-                                    if (book.bookUrl != state.books.lastOrNull()?.bookUrl) {
-                                        HorizontalDivider(
-                                            modifier = Modifier.padding(horizontal = 8.dp),
-                                            thickness = 0.5.dp,
-                                            color = colorResource(R.color.secondaryText).copy(alpha = 0.12f)
-                                        )
-                                    }
-                                }
-                            }
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(columns),
+                state = gridState,
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(
+                    start = 8.dp,
+                    top = 8.dp,
+                    end = 8.dp,
+                    bottom = bottomContentPadding
+                ),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(
+                    if (layoutMode == ExploreShowLayoutMode.LIST) 0.dp else 16.dp
+                )
+            ) {
+                if (layoutMode == ExploreShowLayoutMode.LIST) {
+                    items(
+                        items = state.books,
+                        key = { "list_${it.bookUrl}" },
+                        span = { GridItemSpan(maxLineSpan) }
+                    ) { book ->
+                        val displayName = if (state.autoTranslateEnabled) {
+                            state.translatedNames[book.name] ?: book.name
                         } else {
-                            items(
-                                items = state.books,
-                                key = { "grid_${it.bookUrl}" }
-                            ) { book ->
-                                ExploreBookGridCard(
-                                    book = book,
-                                    inBookshelf = state.isBookInShelf(book),
-                                    coverBitmapCache = coverBitmapCache,
-                                    onClick = { onOpenBook(book) }
+                            book.name
+                        }
+                        val displayBook = if (displayName != book.name) {
+                            book.copy(name = displayName)
+                        } else {
+                            book
+                        }
+                        Column {
+                            SearchResultCard(
+                                book = displayBook,
+                                inBookshelf = state.isBookInShelf(book),
+                                originCount = 0,
+                                onClick = { onOpenBook(book) },
+                                onLongClick = { onOpenBook(book) },
+                                outerHorizontalPadding = 0.dp,
+                                outerVerticalPadding = 0.dp,
+                                cardCornerRadius = 0.dp,
+                                cardContentPadding = 8.dp,
+                                cardBackgroundColorRes = android.R.color.transparent,
+                                cardBorderWidth = 0.dp,
+                                coverBitmapCache = coverBitmapCache,
+                            )
+                            if (book.bookUrl != state.books.lastOrNull()?.bookUrl) {
+                                HorizontalDivider(
+                                    modifier = Modifier.padding(horizontal = 8.dp),
+                                    thickness = 0.5.dp,
+                                    color = colorResource(R.color.secondaryText).copy(alpha = 0.12f)
                                 )
                             }
                         }
+                    }
+                } else {
+                    items(
+                        items = state.books,
+                        key = { "grid_${it.bookUrl}" }
+                    ) { book ->
+                        val displayName = if (state.autoTranslateEnabled) {
+                            state.translatedNames[book.name] ?: book.name
+                        } else {
+                            book.name
+                        }
+                        ExploreBookGridCard(
+                            book = book,
+                            displayName = displayName,
+                            inBookshelf = state.isBookInShelf(book),
+                            coverBitmapCache = coverBitmapCache,
+                            columns = columns,
+                            onClick = { onOpenBook(book) }
+                        )
+                    }
+                }
 
-                        when {
-                            state.isContentLoading && !state.isLoadingPrevious -> {
-                                item(span = { GridItemSpan(maxLineSpan) }) {
-                                    ExploreStatusRow(text = stringResource(R.string.is_loading), loading = true)
-                                }
-                            }
+                when {
+                    state.isContentLoading && !state.isLoadingPrevious -> {
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            ExploreStatusRow(text = stringResource(R.string.is_loading), loading = true)
+                        }
+                    }
 
-                            state.contentError != null -> {
-                                item(span = { GridItemSpan(maxLineSpan) }) {
-                                    ExploreContentErrorRow(
-                                        error = state.contentError,
-                                        onRetry = onRetryContent,
-                                        onShowError = onShowError
-                                    )
-                                }
-                            }
+                    state.contentError != null -> {
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            ExploreContentErrorRow(
+                                error = state.contentError,
+                                onRetry = onRetryContent,
+                                onShowError = onShowError
+                            )
+                        }
+                    }
 
-                            state.selectedKind == null && !state.isKindsLoading -> {
-                                item(span = { GridItemSpan(maxLineSpan) }) {
-                                    ExploreStatusRow(stringResource(R.string.explore_category_empty))
-                                }
-                            }
+                    state.selectedKind == null && !state.isKindsLoading -> {
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            ExploreStatusRow(stringResource(R.string.explore_category_empty))
+                        }
+                    }
 
-                            state.books.isEmpty() && state.selectedKind != null -> {
-                                item(span = { GridItemSpan(maxLineSpan) }) {
-                                    ExploreStatusRow(stringResource(R.string.empty))
-                                }
-                            }
+                    state.books.isEmpty() && state.selectedKind != null -> {
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            ExploreStatusRow(stringResource(R.string.empty))
+                        }
+                    }
 
-                            !state.hasMore -> {
-                                item(span = { GridItemSpan(maxLineSpan) }) {
-                                    ExploreStatusRow(stringResource(R.string.explore_no_more))
-                                }
-                            }
+                    !state.hasMore -> {
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            ExploreStatusRow(stringResource(R.string.explore_no_more))
                         }
                     }
                 }
-                if (categoryPanelVisible) {
-                    Box(Modifier.matchParentSize().pointerInput(Unit) {
-                        detectTapGestures { categoriesExpanded = false }
-                    })
-                }
-                androidx.compose.animation.AnimatedVisibility(visibleState = categoryVisibility) {
-                    NgGlassSurface(
-                        modifier = Modifier.fillMaxWidth()
-                            .navigationBarsPadding()
-                            .padding(start = 14.dp, end = 14.dp, bottom = 4.dp)
-                            .onGloballyPositioned { categoryPanelLeft = it.boundsInRoot().left }
-                            .pointerInput(Unit) { detectTapGestures { } },
-                        role = NgMaterialRole.CONTROL,
-                        liquidCornerRadius = NgTheme.shapes.mediumDp.dp,
-                        shape = categoryShape,
-                        contentPadding = PaddingValues(top = 4.dp),
-                        style = NgGlassDefaults.bookDetailStyle(
-                            containerColor = colorResource(R.color.ng_surface_card)
-                        )
-                    ) {
-                        ExploreCategoryPanel(
-                            state = state,
-                            kindSections = kindSections,
-                            sectionRows = sectionRows,
-                            controlRows = controlRows,
-                            activeSectionIndex = activeSectionIndex,
-                            onSelectKind = onSelectKind,
-                            onOpenKind = selectKind,
-                            onRefreshKinds = onRefreshKinds,
-                            onShowError = onShowError
-                        )
-
-                    }
-                }
-
+            }
+        }
+        if (categoryPanelVisible) {
+            Box(Modifier.matchParentSize().pointerInput(Unit) {
+                detectTapGestures { onCategoriesExpandedChange(false) }
+            })
+        }
+        androidx.compose.animation.AnimatedVisibility(visibleState = categoryVisibility) {
+            NgGlassSurface(
+                modifier = Modifier.fillMaxWidth()
+                    .then(if (useNavigationBarsPadding) Modifier.navigationBarsPadding() else Modifier)
+                    .padding(start = 14.dp, end = 14.dp, bottom = 4.dp)
+                    .onGloballyPositioned { categoryPanelLeft = it.boundsInRoot().left }
+                    .pointerInput(Unit) { detectTapGestures { } },
+                role = NgMaterialRole.CONTROL,
+                liquidCornerRadius = NgTheme.shapes.mediumDp.dp,
+                shape = categoryShape,
+                contentPadding = PaddingValues(top = 4.dp),
+                style = NgGlassDefaults.bookDetailStyle(
+                    containerColor = colorResource(R.color.ng_surface_card)
+                )
+            ) {
+                ExploreCategoryPanel(
+                    state = state,
+                    kindSections = kindSections,
+                    sectionRows = sectionRows,
+                    controlRows = controlRows,
+                    activeSectionIndex = activeSectionIndex,
+                    onSelectKind = onSelectKind,
+                    onOpenKind = selectKind,
+                    onRefreshKinds = onRefreshKinds,
+                    onShowError = onShowError
+                )
             }
         }
     }
@@ -512,7 +572,9 @@ private fun ExploreShowUiState.isBookInShelf(book: SearchBook): Boolean {
 private fun ExploreShowTopBar(
     sourceName: String,
     isLoading: Boolean,
+    autoTranslateEnabled: Boolean,
     onBack: () -> Unit,
+    onToggleAutoTranslate: () -> Unit,
     onRefresh: () -> Unit,
     categoriesExpanded: Boolean,
     onToggleCategories: () -> Unit,
@@ -547,6 +609,16 @@ private fun ExploreShowTopBar(
                 textAlign = TextAlign.Start
             )
             ExploreToolbarButton(
+                iconRes = R.drawable.ic_translate,
+                description = stringResource(R.string.explore_auto_translate),
+                tint = if (autoTranslateEnabled) Color(NgTheme.colors.primary) else contentColor,
+                onClick = onToggleAutoTranslate,
+                modifier = Modifier.background(
+                    if (autoTranslateEnabled) Color(NgTheme.colors.primary).copy(alpha = 0.13f)
+                    else Color.Transparent, RoundedCornerShape(10.dp))
+            )
+            Spacer(Modifier.width(2.dp))
+            ExploreToolbarButton(
                 iconRes = R.drawable.ic_grid_menu,
                 description = stringResource(if (categoriesExpanded)
                     R.string.explore_hide_categories else R.string.explore_show_categories),
@@ -577,7 +649,7 @@ private fun ExploreShowTopBar(
 }
 
 @Composable
-private fun ExploreToolbarButton(
+internal fun ExploreToolbarButton(
     iconRes: Int,
     description: String,
     tint: Color,
@@ -792,7 +864,7 @@ private fun ExploreCategoryTile(
 }
 
 @Composable
-private fun ExploreCategoryGlyph(
+internal fun ExploreCategoryGlyph(
     label: String,
     background: Color,
     foreground: Color,
@@ -820,10 +892,11 @@ private fun ExploreCategoryGlyph(
 }
 
 @Composable
-private fun ExploreContentToolbar(
+internal fun ExploreContentToolbar(
     selectedKindLabel: String,
     page: Int,
     layoutMode: ExploreShowLayoutMode,
+    onToggleCategories: () -> Unit = {},
     onSelectPage: () -> Unit,
     navigationAvailable: Boolean,
     gridState: LazyGridState,
@@ -845,7 +918,11 @@ private fun ExploreContentToolbar(
             text = selectedKindLabel.ifBlank {
                 stringResource(R.string.explore_category_empty)
             },
-            modifier = Modifier.weight(1f),
+            modifier = Modifier
+                .weight(1f)
+                .clip(RoundedCornerShape(8.dp))
+                .clickable(onClick = onToggleCategories)
+                .padding(vertical = 4.dp),
             color = colorResource(R.color.primaryText),
             fontSize = 16.sp,
             fontWeight = FontWeight.SemiBold,
@@ -875,24 +952,76 @@ private fun ExploreContentToolbar(
             enabled = navigationEnabled && canGoNext,
             onClick = onNext
         )
-        ExploreLayoutButton(
-            selected = layoutMode == ExploreShowLayoutMode.LIST,
-            iconRes = R.drawable.ic_chapter_list,
-            description = stringResource(R.string.replace_view_list),
-            onClick = { onLayoutModeChange(ExploreShowLayoutMode.LIST) }
-        )
-        Spacer(Modifier.width(2.dp))
-        ExploreLayoutButton(
-            selected = layoutMode == ExploreShowLayoutMode.GRID,
-            iconRes = R.drawable.ic_view_quilt,
-            description = stringResource(R.string.explore_view_grid),
-            onClick = { onLayoutModeChange(ExploreShowLayoutMode.GRID) }
+        ExploreLayoutModePopupButton(
+            layoutMode = layoutMode,
+            onLayoutModeChange = onLayoutModeChange,
         )
     }
 }
 
 @Composable
-private fun ExplorePageButton(
+internal fun ExploreLayoutModePopupButton(
+    layoutMode: ExploreShowLayoutMode,
+    onLayoutModeChange: (ExploreShowLayoutMode) -> Unit,
+) {
+    val menuState = remember { NgPopupToggleState() }
+    val menuItems = remember(layoutMode) {
+        listOf(
+            NgExpandableActionMenuItem(
+                itemId = ExploreShowLayoutMode.LIST.value,
+                titleRes = 0,
+                iconRes = R.drawable.ic_chapter_list,
+                title = "列表视图",
+                checked = layoutMode == ExploreShowLayoutMode.LIST,
+            ),
+            NgExpandableActionMenuItem(
+                itemId = ExploreShowLayoutMode.GRID_2.value,
+                titleRes = 0,
+                iconRes = R.drawable.ic_grid_menu,
+                title = "2列网格",
+                checked = layoutMode == ExploreShowLayoutMode.GRID_2,
+            ),
+            NgExpandableActionMenuItem(
+                itemId = ExploreShowLayoutMode.GRID.value,
+                titleRes = 0,
+                iconRes = R.drawable.ic_view_quilt,
+                title = "3列网格",
+                checked = layoutMode == ExploreShowLayoutMode.GRID,
+            ),
+        )
+    }
+    val currentIconRes = when (layoutMode) {
+        ExploreShowLayoutMode.LIST -> R.drawable.ic_chapter_list
+        ExploreShowLayoutMode.GRID_2 -> R.drawable.ic_grid_menu
+        ExploreShowLayoutMode.GRID -> R.drawable.ic_view_quilt
+    }
+    Box {
+        ExploreLayoutButton(
+            selected = menuState.expanded,
+            iconRes = currentIconRes,
+            description = stringResource(R.string.switchLayout),
+            onClick = menuState::onAnchorClick,
+        )
+        NgExpandableActionMenu(
+            expanded = menuState.expanded,
+            onDismissRequest = menuState::onDismissRequest,
+            items = menuItems,
+            variant = NgExpandableActionMenuVariant.SIDE_SLIDE,
+            sideSlideEndMargin = 14.dp,
+            sideSlideAnchorGap = 6.dp,
+            width = 148.dp,
+            properties = PopupProperties(focusable = true, clippingEnabled = false),
+            onItemClick = { item ->
+                if (!menuState.expanded) return@NgExpandableActionMenu
+                menuState.close()
+                onLayoutModeChange(ExploreShowLayoutMode.from(item.itemId))
+            },
+        )
+    }
+}
+
+@Composable
+internal fun ExplorePageButton(
     iconRes: Int,
     description: String,
     enabled: Boolean,
@@ -914,7 +1043,7 @@ private fun ExplorePageButton(
 }
 
 @Composable
-private fun ExploreLayoutButton(
+internal fun ExploreLayoutButton(
     selected: Boolean,
     iconRes: Int,
     description: String,
@@ -947,8 +1076,10 @@ private fun ExploreLayoutButton(
 @Composable
 private fun ExploreBookGridCard(
     book: SearchBook,
+    displayName: String,
     inBookshelf: Boolean,
     coverBitmapCache: SearchCoverBitmapCache,
+    columns: Int = 3,
     onClick: () -> Unit
 ) {
     Column(
@@ -963,8 +1094,8 @@ private fun ExploreBookGridCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(0.74f),
-                coverWidth = 108.dp,
-                coverHeight = 146.dp,
+                coverWidth = if (columns == 2) 156.dp else 108.dp,
+                coverHeight = if (columns == 2) 210.dp else 146.dp,
                 bitmapCache = coverBitmapCache,
             )
             if (inBookshelf) {
@@ -979,7 +1110,7 @@ private fun ExploreBookGridCard(
         }
         Spacer(Modifier.height(6.dp))
         Text(
-            text = book.name,
+            text = displayName,
             color = colorResource(R.color.primaryText),
             fontSize = 13.sp,
             fontWeight = FontWeight.Medium,
@@ -999,7 +1130,7 @@ private fun ExploreBookGridCard(
 }
 
 @Composable
-private fun ExploreStatusRow(text: String, loading: Boolean = false) {
+internal fun ExploreStatusRow(text: String, loading: Boolean = false) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1016,7 +1147,7 @@ private fun ExploreStatusRow(text: String, loading: Boolean = false) {
 }
 
 @Composable
-private fun ExploreErrorRow(error: String, onShowError: (String) -> Unit) {
+internal fun ExploreErrorRow(error: String, onShowError: (String) -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -1036,7 +1167,7 @@ private fun ExploreErrorRow(error: String, onShowError: (String) -> Unit) {
 }
 
 @Composable
-private fun ExploreContentErrorRow(
+internal fun ExploreContentErrorRow(
     error: String,
     onRetry: () -> Unit,
     onShowError: (String) -> Unit

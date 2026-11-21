@@ -92,6 +92,7 @@ object PreferKey {
     const val showDiscovery = "showDiscovery"
     const val exploreLayoutMode = "exploreLayoutMode"
     const val exploreShowLayoutMode = "exploreShowLayoutMode"
+    const val bookSourceDedupeMode = "bookSourceDedupeMode"
     const val enableReview = "enableReview"
     const val showRss = "showRss"
     const val bookshelfLayout = "bookshelfLayout"

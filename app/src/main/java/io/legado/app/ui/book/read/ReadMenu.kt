@@ -44,6 +44,8 @@ import io.legado.app.help.config.ReadFloatingTool
 import io.legado.app.help.config.ReadFloatingToolSettings
 import io.legado.app.help.coroutine.Coroutine
 import io.legado.app.help.source.getSourceType
+import io.legado.app.help.translate.BookTitleTranslator
+import io.legado.app.help.translate.TranslateConfig
 import io.legado.app.model.ReadBook
 import io.legado.app.model.SourceCallBack
 import io.legado.app.ui.book.read.config.showReadConfirmDialog
@@ -219,6 +221,7 @@ class ReadMenu @JvmOverloads constructor(
         ivHeaderRefresh.setColorFilter(textColor)
         ivHeaderChangeSource.setColorFilter(textColor)
         ivHeaderDownload.setColorFilter(textColor)
+        updateTranslateIconState()
         updateHeaderActionMode()
         if (AppConfig.isEInkMode) {
             readTopGlass.gone()
@@ -286,6 +289,7 @@ class ReadMenu @JvmOverloads constructor(
         binding.ivHeaderRefresh.setColorFilter(textColor)
         binding.ivHeaderChangeSource.setColorFilter(textColor)
         binding.ivHeaderDownload.setColorFilter(textColor)
+        updateTranslateIconState()
         updateSourceStateStyle()
         binding.titleBar.setColorFilter(textColor)
         binding.titleBar.toolbar.post {
@@ -705,6 +709,9 @@ class ReadMenu @JvmOverloads constructor(
         ivHeaderDownload.setOnClickListener {
             callBack.onHeaderDownload()
         }
+        ivHeaderTranslate.setOnClickListener {
+            callBack.onHeaderTranslate()
+        }
         tvSourceName.setOnClickListener {
             showSourceActionPopup(it)
         }
@@ -831,10 +838,38 @@ class ReadMenu @JvmOverloads constructor(
         menuTopOut.setAnimationListener(menuOutListener)
     }
 
+    fun updateTranslateIconState() {
+        val enabled = TranslateConfig.isBookContentTranslateEnabled(ReadBook.book?.bookUrl)
+        binding.ivHeaderTranslate.setColorFilter(
+            if (enabled) readMenuThemeSnapshot.colors.primary else textColor
+        )
+    }
+
     fun upBookView() {
         binding.titleBar.title = null
         updateHeaderActionMode()
-        binding.tvBookTitle.text = ReadBook.book?.name.orEmpty()
+        updateTranslateIconState()
+        val book = ReadBook.book
+        val originName = book?.name.orEmpty()
+        if (book != null && TranslateConfig.isBookTranslateEnabled(book.bookUrl)) {
+            val cached = BookTitleTranslator.getCached(originName)
+            binding.tvBookTitle.text = cached ?: originName
+            if (cached == null && BookTitleTranslator.needsTranslation(originName)) {
+                val targetUrl = book.bookUrl
+                Coroutine.async {
+                    BookTitleTranslator.translateText(originName)
+                }.onSuccess { translated ->
+                    if (!translated.isNullOrBlank() &&
+                        ReadBook.book?.bookUrl == targetUrl &&
+                        TranslateConfig.isBookTranslateEnabled(targetUrl)
+                    ) {
+                        binding.tvBookTitle.text = translated
+                    }
+                }
+            }
+        } else {
+            binding.tvBookTitle.text = originName
+        }
         val sourceName = ReadBook.bookSource?.bookSourceName
             ?: ReadBook.book?.originName
             ?: context.getString(R.string.book_source)
@@ -988,6 +1023,7 @@ class ReadMenu @JvmOverloads constructor(
         fun onHeaderChangeSource()
         fun onHeaderRefresh()
         fun onHeaderDownload()
+        fun onHeaderTranslate()
         fun showReadChangeSourceMenu(anchor: View)
         fun showReadRefreshMenu(anchor: View)
         fun skipToChapter(index: Int)

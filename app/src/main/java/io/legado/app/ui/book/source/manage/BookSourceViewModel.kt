@@ -3,11 +3,15 @@ package io.legado.app.ui.book.source.manage
 import android.app.Application
 import android.text.TextUtils
 import io.legado.app.base.BaseViewModel
+import io.legado.app.constant.AppPattern
 import io.legado.app.constant.BookSourceType
 import io.legado.app.data.appDb
 import io.legado.app.data.entities.BookSource
 import io.legado.app.data.entities.BookSourcePart
 import io.legado.app.data.entities.toBookSource
+import io.legado.app.help.source.BookSourceDedupe
+import io.legado.app.help.source.BookSourceDedupeMode
+import io.legado.app.help.source.BookSourceR18Detector
 import io.legado.app.help.source.SourceHelp
 import io.legado.app.model.jsSource.isJsSource
 import io.legado.app.utils.FileUtils
@@ -21,6 +25,8 @@ import io.legado.app.utils.writeToOutputStream
 import java.io.File
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 
 /**
  * 书源管理数据修改
@@ -52,7 +58,9 @@ class BookSourceViewModel(application: Application) : BaseViewModel(application)
 
     fun del(sources: List<BookSourcePart>) {
         execute {
-            SourceHelp.deleteBookSourceParts(sources)
+            withContext(NonCancellable) {
+                SourceHelp.deleteBookSourceParts(sources)
+            }
         }
     }
 
@@ -69,13 +77,23 @@ class BookSourceViewModel(application: Application) : BaseViewModel(application)
 
     fun enable(enable: Boolean, items: List<BookSourcePart>) {
         execute {
-            appDb.bookSourceDao.enable(enable, items)
+            if (enable) {
+                appDb.bookSourceDao.enable(true, items.filter(BookSourcePart::hasSearchUrl))
+                appDb.bookSourceDao.enable(false, items.filterNot(BookSourcePart::hasSearchUrl))
+            } else {
+                appDb.bookSourceDao.enable(false, items)
+            }
         }
     }
 
     fun enableExplore(enable: Boolean, items: List<BookSourcePart>) {
         execute {
-            appDb.bookSourceDao.enableExplore(enable, items)
+            if (enable) {
+                appDb.bookSourceDao.enableExplore(true, items.filter(BookSourcePart::hasExploreUrl))
+                appDb.bookSourceDao.enableExplore(false, items.filterNot(BookSourcePart::hasExploreUrl))
+            } else {
+                appDb.bookSourceDao.enableExplore(false, items)
+            }
         }
     }
 
@@ -85,10 +103,14 @@ class BookSourceViewModel(application: Application) : BaseViewModel(application)
         exploreEnabled: Boolean,
     ) {
         execute {
-            appDb.bookSourceDao.enable(source.bookSourceUrl, searchEnabled)
-            if (source.hasExploreUrl) {
-                appDb.bookSourceDao.enableExplore(source.bookSourceUrl, exploreEnabled)
-            }
+            appDb.bookSourceDao.enable(
+                source.bookSourceUrl,
+                if (source.hasSearchUrl) searchEnabled else false,
+            )
+            appDb.bookSourceDao.enableExplore(
+                source.bookSourceUrl,
+                if (source.hasExploreUrl) exploreEnabled else false,
+            )
         }
     }
 
@@ -98,31 +120,112 @@ class BookSourceViewModel(application: Application) : BaseViewModel(application)
         exploreEnabled: Boolean,
     ) {
         execute {
-            appDb.bookSourceDao.enable(searchEnabled, sources)
-            appDb.bookSourceDao.enableExplore(
-                exploreEnabled,
-                sources.filter(BookSourcePart::hasExploreUrl),
-            )
+            if (searchEnabled) {
+                appDb.bookSourceDao.enable(true, sources.filter(BookSourcePart::hasSearchUrl))
+                appDb.bookSourceDao.enable(false, sources.filterNot(BookSourcePart::hasSearchUrl))
+            } else {
+                appDb.bookSourceDao.enable(false, sources)
+            }
+            if (exploreEnabled) {
+                appDb.bookSourceDao.enableExplore(true, sources.filter(BookSourcePart::hasExploreUrl))
+                appDb.bookSourceDao.enableExplore(false, sources.filterNot(BookSourcePart::hasExploreUrl))
+            } else {
+                appDb.bookSourceDao.enableExplore(false, sources)
+            }
+        }
+    }
+
+    fun updateSelectionType(
+        sources: List<BookSourcePart>,
+        @BookSourceType.Type bookSourceType: Int,
+    ) {
+        if (sources.isEmpty()) return
+        execute {
+            appDb.bookSourceDao.upType(bookSourceType, sources)
+        }
+    }
+
+    /**
+     * 去重模式下批量禁用所有非唯一重复书源的搜索与发现，避免重复访问同一源URL。
+     */
+    fun disableNonPrimaryDuplicates(
+        mode: BookSourceDedupeMode,
+        preferredPrimaries: Map<String, String>,
+    ) {
+        if (mode == BookSourceDedupeMode.NONE) return
+        execute {
+            val allParts = appDb.bookSourceDao.allPart
+            if (allParts.size <= 1) return@execute
+            val scores = BookSourceDedupe.getCachedRuleScores().ifEmpty {
+                appDb.bookSourceDao.allRuleScores()
+                    .associate { it.bookSourceUrl to it.score }
+                    .also(BookSourceDedupe::updateCachedRuleScores)
+            }
+            val tree = BookSourceDedupe.buildTree(allParts, mode, scores, preferredPrimaries)
+            val nonPrimaries = ArrayList<BookSourcePart>()
+            for (node in tree) {
+                if (!node.hasDuplicates) continue
+                val primaryUrl = node.primary.bookSourceUrl
+                for (child in node.allSources) {
+                    if (child.bookSourceUrl != primaryUrl && (child.enabled || child.enabledExplore)) {
+                        nonPrimaries.add(child)
+                    }
+                }
+            }
+            if (nonPrimaries.isNotEmpty()) {
+                appDb.bookSourceDao.enable(false, nonPrimaries)
+                appDb.bookSourceDao.enableExplore(false, nonPrimaries)
+            }
+        }
+    }
+
+    /**
+     * 切换重复组唯一主书源时：按能力启用新主书源，并禁用同组其他重复书源的搜索与发现。
+     */
+    fun switchDedupePrimaryEnabled(
+        primary: BookSourcePart,
+        groupSources: List<BookSourcePart>,
+    ) {
+        execute {
+            appDb.bookSourceDao.enable(primary.bookSourceUrl, primary.hasSearchUrl)
+            appDb.bookSourceDao.enableExplore(primary.bookSourceUrl, primary.hasExploreUrl)
+            val others = groupSources.filter { it.bookSourceUrl != primary.bookSourceUrl }
+            if (others.isNotEmpty()) {
+                appDb.bookSourceDao.enable(false, others)
+                appDb.bookSourceDao.enableExplore(false, others)
+            }
         }
     }
 
     fun selectionAddToGroups(sources: List<BookSourcePart>, groups: String) {
+        if (sources.isEmpty() || groups.isBlank()) return
         execute {
-            val array = sources.map {
-                it.copy().apply {
-                    addGroup(groups)
+            val updates = LinkedHashMap<String, MutableList<String>>()
+            for (source in sources) {
+                val before = source.bookSourceGroup.orEmpty()
+                val updated = source.copy().apply { addGroup(groups) }.bookSourceGroup.orEmpty()
+                if (updated != before) {
+                    updates.getOrPut(updated) { arrayListOf() }.add(source.bookSourceUrl)
                 }
             }
-            appDb.bookSourceDao.upGroup(array)
+            if (updates.isNotEmpty()) {
+                appDb.bookSourceDao.upGroupBatch(updates)
+            }
         }
     }
 
     fun selectionClearGroups(sources: List<BookSourcePart>) {
+        if (sources.isEmpty()) return
         execute {
-            val array = sources.map {
-                it.copy(bookSourceGroup = "")
+            val urls = sources
+                .asSequence()
+                .filter { !it.bookSourceGroup.isNullOrEmpty() }
+                .map { it.bookSourceUrl }
+                .distinct()
+                .toList()
+            if (urls.isNotEmpty()) {
+                appDb.bookSourceDao.upGroupBatch(mapOf("" to urls))
             }
-            appDb.bookSourceDao.upGroup(array)
         }
     }
 
@@ -130,9 +233,55 @@ class BookSourceViewModel(application: Application) : BaseViewModel(application)
         sources: List<BookSourcePart>,
         selectedRuleTypes: Set<BookSourceAutoGroupRuleType>,
     ) {
+        if (sources.isEmpty() || selectedRuleTypes.isEmpty()) return
         execute {
+            val detectR18 = BookSourceAutoGroupRuleType.R18_DETECTION in selectedRuleTypes
+            val otherRules = selectedRuleTypes - BookSourceAutoGroupRuleType.R18_DETECTION
+            val r18Urls = if (detectR18) {
+                val keys = sources.map(BookSourcePart::bookSourceUrl).distinct()
+                val matched = HashSet<String>()
+                keys.chunked(900).forEach { chunk ->
+                    appDb.bookSourceDao.getR18ScanEntriesByKeys(chunk).forEach { entry ->
+                        if (BookSourceR18Detector.isR18(
+                                name = entry.bookSourceName,
+                                url = entry.bookSourceUrl,
+                                group = entry.bookSourceGroup,
+                                comment = entry.bookSourceComment,
+                                exploreUrl = entry.exploreUrl,
+                                searchUrl = entry.searchUrl,
+                            )
+                        ) {
+                            matched.add(entry.bookSourceUrl)
+                        }
+                    }
+                }
+                matched
+            } else {
+                emptySet()
+            }
+
+            // 仅勾选 R18 识别时：采用追加分组模式，保留书源原有分组
+            if (otherRules.isEmpty()) {
+                val updates = LinkedHashMap<String, MutableList<String>>()
+                for (source in sources) {
+                    if (source.bookSourceUrl !in r18Urls) continue
+                    val before = source.bookSourceGroup.orEmpty()
+                    val updated = source.copy()
+                        .apply { addGroup(BookSourceR18Detector.R18_GROUP_NAME) }
+                        .bookSourceGroup.orEmpty()
+                    if (updated != before) {
+                        updates.getOrPut(updated) { arrayListOf() }.add(source.bookSourceUrl)
+                    }
+                }
+                if (updates.isNotEmpty()) {
+                    appDb.bookSourceDao.upGroupBatch(updates)
+                }
+                context.toastOnUi("R18 识别完成：命中 ${r18Urls.size} 个书源")
+                return@execute
+            }
+
             val sharedBaseUrlGroups = if (
-                BookSourceAutoGroupRuleType.URL_CATEGORY in selectedRuleTypes
+                BookSourceAutoGroupRuleType.URL_CATEGORY in otherRules
             ) {
                 BookSourceAutoGroup.sharedBaseUrlGroups(
                     appDb.bookSourceDao.allPart.map { it.bookSourceUrl }
@@ -140,23 +289,36 @@ class BookSourceViewModel(application: Application) : BaseViewModel(application)
             } else {
                 emptyMap()
             }
-            val needsDebugSource = BookSourceAutoGroupRuleType.DEBUG_FEATURES in selectedRuleTypes
-            val array = sources.map {
+            val needsDebugSource = BookSourceAutoGroupRuleType.DEBUG_FEATURES in otherRules
+            val updates = LinkedHashMap<String, MutableList<String>>()
+            for (source in sources) {
                 val fullSource = if (needsDebugSource) {
-                    appDb.bookSourceDao.getBookSource(it.bookSourceUrl)
+                    appDb.bookSourceDao.getBookSource(source.bookSourceUrl)
                 } else {
                     null
                 }
-                it.copy(
-                    bookSourceGroup = autoGroupNames(
-                        source = it,
-                        fullSource = fullSource,
-                        sharedBaseUrlGroup = sharedBaseUrlGroups[it.bookSourceUrl],
-                        selectedRuleTypes = selectedRuleTypes,
-                    ).joinToString(",")
-                )
+                val newGroups = autoGroupNames(
+                    source = source,
+                    fullSource = fullSource,
+                    sharedBaseUrlGroup = sharedBaseUrlGroups[source.bookSourceUrl],
+                    selectedRuleTypes = otherRules,
+                ).toMutableList()
+                if (detectR18 && source.bookSourceUrl in r18Urls &&
+                    BookSourceR18Detector.R18_GROUP_NAME !in newGroups
+                ) {
+                    newGroups.add(BookSourceR18Detector.R18_GROUP_NAME)
+                }
+                val newGroupStr = newGroups.joinToString(",")
+                if (newGroupStr != source.bookSourceGroup.orEmpty()) {
+                    updates.getOrPut(newGroupStr) { arrayListOf() }.add(source.bookSourceUrl)
+                }
             }
-            appDb.bookSourceDao.upGroup(array)
+            if (updates.isNotEmpty()) {
+                appDb.bookSourceDao.upGroupBatch(updates)
+            }
+            if (detectR18) {
+                context.toastOnUi("自动分组完成，其中识别 R18 书源 ${r18Urls.size} 个")
+            }
         }
     }
 
@@ -329,36 +491,48 @@ class BookSourceViewModel(application: Application) : BaseViewModel(application)
 
     fun addGroup(group: String) {
         execute {
-            val sources = appDb.bookSourceDao.noGroup
-            sources.forEach { source ->
-                source.bookSourceGroup = group
-            }
-            appDb.bookSourceDao.update(*sources.toTypedArray())
+            appDb.bookSourceDao.assignGroupToNoGroup(group)
         }
     }
 
     fun upGroup(oldGroup: String, newGroup: String?) {
         execute {
-            val sources = appDb.bookSourceDao.getByGroup(oldGroup)
-            sources.forEach { source ->
-                source.bookSourceGroup?.splitNotBlank(",")?.toHashSet()?.let {
-                    it.remove(oldGroup)
-                    if (!newGroup.isNullOrEmpty())
-                        it.add(newGroup)
-                    source.bookSourceGroup = TextUtils.join(",", it)
+            val entries = appDb.bookSourceDao.getGroupEntriesByGroup(oldGroup)
+            val updates = LinkedHashMap<String, MutableList<String>>()
+            for (entry in entries) {
+                val rawGroup = entry.bookSourceGroup ?: continue
+                val set = rawGroup.splitNotBlank(AppPattern.splitGroupRegex).toCollection(linkedSetOf())
+                if (!set.remove(oldGroup)) continue
+                if (!newGroup.isNullOrEmpty()) {
+                    set.add(newGroup)
+                }
+                val updated = TextUtils.join(",", set)
+                if (updated != rawGroup) {
+                    updates.getOrPut(updated) { arrayListOf() }.add(entry.bookSourceUrl)
                 }
             }
-            appDb.bookSourceDao.update(*sources.toTypedArray())
+            if (updates.isNotEmpty()) {
+                appDb.bookSourceDao.upGroupBatch(updates)
+            }
         }
     }
 
     fun delGroup(group: String) {
         execute {
-            val sources = appDb.bookSourceDao.getExactByGroup(group)
-            sources.forEach { source ->
-                source.removeGroup(group)
+            val entries = appDb.bookSourceDao.getExactGroupEntriesByGroup(group)
+            val updates = LinkedHashMap<String, MutableList<String>>()
+            for (entry in entries) {
+                val rawGroup = entry.bookSourceGroup ?: continue
+                val set = rawGroup.splitNotBlank(AppPattern.splitGroupRegex).toCollection(linkedSetOf())
+                if (!set.remove(group)) continue
+                val updated = TextUtils.join(",", set)
+                if (updated != rawGroup) {
+                    updates.getOrPut(updated) { arrayListOf() }.add(entry.bookSourceUrl)
+                }
             }
-            appDb.bookSourceDao.update(*sources.toTypedArray())
+            if (updates.isNotEmpty()) {
+                appDb.bookSourceDao.upGroupBatch(updates)
+            }
         }
     }
 

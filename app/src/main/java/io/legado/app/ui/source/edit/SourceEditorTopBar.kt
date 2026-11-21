@@ -24,16 +24,42 @@ import io.legado.app.ui.design.components.compose.NgExpandableActionMenuItem
 import io.legado.app.ui.design.components.compose.NgPopupToggleState
 import io.legado.app.ui.design.theme.NgTheme
 
-internal fun sourceEditorMenuItems(hasSearch: Boolean, hasLogin: Boolean) = buildList {
+internal const val SOURCE_EDITOR_FETCH_SITE_NAME_ID = 0x57000001
+internal const val SOURCE_EDITOR_SAVE_LOCAL_ID = 0x57000002
+
+internal fun sourceEditorMenuItems(
+    hasSearch: Boolean,
+    hasLogin: Boolean,
+    hasFetchSiteName: Boolean = false,
+    hasSaveLocal: Boolean = false,
+) = buildList {
     if (hasSearch) add(NgExpandableActionMenuItem(R.id.menu_search, R.string.search, R.drawable.ic_search))
     if (hasLogin) add(NgExpandableActionMenuItem(R.id.menu_login, R.string.login, R.drawable.ic_book_info_menu_login))
     add(NgExpandableActionMenuItem(R.id.menu_copy_source, R.string.copy_source, R.drawable.ic_copy))
     add(NgExpandableActionMenuItem(R.id.menu_paste_source, R.string.paste_source, R.drawable.ic_import))
     add(NgExpandableActionMenuItem(R.id.menu_set_source_variable, R.string.set_source_variable, R.drawable.ic_code))
+    if (hasFetchSiteName) {
+        add(
+            NgExpandableActionMenuItem(
+                SOURCE_EDITOR_FETCH_SITE_NAME_ID,
+                R.string.book_source_fetch_site_name,
+                R.drawable.ic_web_outline,
+            )
+        )
+    }
     add(NgExpandableActionMenuItem(
         R.id.source_editor_settings, R.string.setting, R.drawable.ic_book_info_menu_settings,
         dividerBefore = true,
     ))
+    if (hasSaveLocal) {
+        add(
+            NgExpandableActionMenuItem(
+                SOURCE_EDITOR_SAVE_LOCAL_ID,
+                R.string.source_editor_save_local,
+                R.drawable.ic_folder_open,
+            )
+        )
+    }
     add(NgExpandableActionMenuItem(
         R.id.source_editor_transfer, R.string.source_editor_import_share, R.drawable.ic_share,
         children = listOf(
@@ -61,6 +87,8 @@ internal fun SourceEditorTopBar(
     autoComplete: Boolean,
     onBack: () -> Unit,
     onAction: (Int) -> Unit,
+    hasFetchSiteName: Boolean = false,
+    hasSaveLocal: Boolean = false,
 ) {
     val menuState = remember { NgPopupToggleState() }
     var loginVisible by remember { mutableStateOf(false) }
@@ -90,7 +118,9 @@ internal fun SourceEditorTopBar(
                 NgExpandableActionMenu(
                     expanded = menuState.expanded,
                     onDismissRequest = menuState::onDismissRequest,
-                    items = remember(hasSearch, loginVisible) { sourceEditorMenuItems(hasSearch, loginVisible) },
+                    items = remember(hasSearch, loginVisible, hasFetchSiteName, hasSaveLocal) {
+                        sourceEditorMenuItems(hasSearch, loginVisible, hasFetchSiteName, hasSaveLocal)
+                    },
                     offset = DpOffset(0.dp, 4.dp),
                     menuContainerColor = Color(NgTheme.colors.cardContainer).copy(alpha = 1f),
                     properties = PopupProperties(focusable = true, clippingEnabled = false),

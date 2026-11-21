@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="book_source_export_share">Export and Share</string>
-    <string name="book_source_capability_manage">Function management</string>
+    <string name="book_source_capability_manage">Enable management</string>
     <string name="book_source_format_js">JS</string>
     <string name="book_source_tag_type_text">Text</string>
     <string name="book_source_tag_type_image">Image</string>

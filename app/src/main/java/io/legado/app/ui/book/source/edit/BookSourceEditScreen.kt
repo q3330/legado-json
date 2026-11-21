@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -18,8 +19,12 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.ui.Alignment
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -60,6 +65,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import io.legado.app.R
 import io.legado.app.ui.source.edit.SourceEditorTopBar
+import io.legado.app.ui.design.components.NgButtonVariant
 import io.legado.app.ui.design.components.NgDialogVariant
 import io.legado.app.ui.design.components.compose.NgCodeHighlightMode
 import io.legado.app.ui.design.components.compose.NgDialog
@@ -68,6 +74,8 @@ import io.legado.app.ui.design.components.compose.NgEditorConfigPanel
 import io.legado.app.ui.design.components.compose.NgEditorSelectOption
 import io.legado.app.ui.design.components.compose.NgEditorTextTabRow
 import io.legado.app.ui.design.components.compose.NgEditorToggleItem
+import io.legado.app.ui.design.components.compose.NgFormActionButton
+import io.legado.app.ui.design.components.compose.NgFormActionButtonAppearance
 import io.legado.app.ui.design.components.compose.NgFormDensity
 import io.legado.app.ui.design.components.compose.NgFormField
 import io.legado.app.ui.design.components.compose.NgFormSelectField
@@ -182,6 +190,8 @@ internal fun BookSourceEditScreen(
             autoComplete = autoComplete,
             onBack = onBack,
             onAction = onAction,
+            hasFetchSiteName = true,
+            hasSaveLocal = true,
         )
         NgEditorConfigPanel(
             selectTitle = stringResource(R.string.book_type).trimEnd(':', '：'),
@@ -190,7 +200,7 @@ internal fun BookSourceEditScreen(
             firstRowToggles = listOf(
                 NgEditorToggleItem(
                     EDITOR_TOGGLE_ENABLED,
-                    stringResource(R.string.is_enable),
+                    stringResource(R.string.search),
                     controls.enabled,
                 ),
                 NgEditorToggleItem(
@@ -697,4 +707,120 @@ private fun UrlOptionField(
         density = NgFormDensity.COMPACT,
         keyboardOptions = keyboardOptions,
     )
+}
+
+@Composable
+internal fun BookSourceFetchSiteNameDialog(
+    initialUrl: String,
+    onDismiss: () -> Unit,
+    onFetchName: suspend (String) -> String?,
+    onWriteName: (String) -> Unit,
+) {
+    var urlText by remember(initialUrl) { mutableStateOf(initialUrl) }
+    var fetchedName by remember { mutableStateOf("") }
+    var loading by remember { mutableStateOf(false) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    val emptyUrlMsg = stringResource(R.string.book_source_fetch_site_name_empty_url)
+    val fetchFailedMsg = stringResource(R.string.book_source_fetch_site_name_failed)
+    val scope = rememberCoroutineScope()
+
+    Dialog(onDismissRequest = onDismiss) {
+        NgDialog(
+            title = stringResource(R.string.book_source_fetch_site_name),
+            variant = NgDialogVariant.FORM_EDITOR,
+            actions = {
+                NgDialogTextActionButton(
+                    text = stringResource(R.string.cancel),
+                    onClick = onDismiss,
+                )
+            },
+        ) {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    NgFormField(
+                        label = stringResource(R.string.source_url),
+                        value = urlText,
+                        onValueChange = {
+                            urlText = it
+                            errorMessage = null
+                        },
+                        modifier = Modifier.weight(1f),
+                        density = NgFormDensity.COMPACT,
+                    )
+                    if (loading) {
+                        Box(
+                            modifier = Modifier.size(width = 64.dp, height = 38.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp,
+                                color = Color(NgTheme.colors.primary),
+                            )
+                        }
+                    } else {
+                        NgFormActionButton(
+                            text = stringResource(R.string.book_source_fetch_site_name_action),
+                            onClick = {
+                                val target = urlText.trim()
+                                if (target.isBlank() || !target.startsWith("http", ignoreCase = true)) {
+                                    errorMessage = emptyUrlMsg
+                                    return@NgFormActionButton
+                                }
+                                loading = true
+                                errorMessage = null
+                                scope.launch {
+                                    val result = runCatching { onFetchName(target) }.getOrNull()
+                                    loading = false
+                                    if (!result.isNullOrBlank()) {
+                                        fetchedName = result
+                                    } else {
+                                        errorMessage = fetchFailedMsg
+                                    }
+                                }
+                            },
+                            modifier = Modifier.width(64.dp),
+                            variant = NgButtonVariant.PRIMARY,
+                            appearance = NgFormActionButtonAppearance.DIALOG,
+                        )
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    NgFormField(
+                        label = stringResource(R.string.book_source_fetch_site_name_result),
+                        value = fetchedName,
+                        onValueChange = { fetchedName = it },
+                        modifier = Modifier.weight(1f),
+                        density = NgFormDensity.COMPACT,
+                        isError = errorMessage != null,
+                        supportingText = errorMessage,
+                    )
+                    NgFormActionButton(
+                        text = stringResource(R.string.book_source_fetch_site_name_write),
+                        onClick = {
+                            val name = fetchedName.trim()
+                            if (name.isNotBlank()) {
+                                onWriteName(name)
+                            }
+                        },
+                        enabled = fetchedName.isNotBlank() && !loading,
+                        modifier = Modifier.width(64.dp),
+                        variant = NgButtonVariant.PRIMARY,
+                        appearance = NgFormActionButtonAppearance.DIALOG,
+                    )
+                }
+            }
+        }
+    }
 }

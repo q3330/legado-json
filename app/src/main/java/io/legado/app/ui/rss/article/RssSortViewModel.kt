@@ -38,11 +38,21 @@ class RssSortViewModel(application: Application) : BaseViewModel(application) {
 
     fun switchLayout() {
         rssSource?.let {
-            if (it.articleStyle < 4) {
-                it.articleStyle += 1
-            } else {
-                it.articleStyle = 0
+            it.articleStyle = when (it.articleStyle) {
+                0, 1 -> 2
+                2, 3 -> 4
+                else -> 0
             }
+            execute {
+                appDb.rssSourceDao.update(it)
+            }
+        }
+    }
+
+    fun setLayoutStyle(style: Int) {
+        rssSource?.let {
+            if (it.articleStyle == style) return
+            it.articleStyle = style
             execute {
                 appDb.rssSourceDao.update(it)
             }

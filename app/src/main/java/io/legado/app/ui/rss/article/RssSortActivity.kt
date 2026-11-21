@@ -58,6 +58,7 @@ class RssSortActivity : VMBaseActivity<RssComposeBinding, RssSortViewModel>(),
     private var hasMore by mutableStateOf(false)
     private var loadError by mutableStateOf<String?>(null)
     private var articleFlowError by mutableStateOf<String?>(null)
+    private var currentPage by mutableIntStateOf(1)
     private var title by mutableStateOf("")
     private var searchVisible by mutableStateOf(false)
     private var searchQuery by mutableStateOf("")
@@ -85,6 +86,7 @@ class RssSortActivity : VMBaseActivity<RssComposeBinding, RssSortViewModel>(),
                     selectedSort = selectedSort,
                     articles = articles,
                     articleStyle = articleStyle,
+                    currentPage = currentPage,
                     refreshing = refreshing,
                     loadingMore = loadingMore,
                     hasMore = hasMore && articleFlowError == null,
@@ -97,6 +99,8 @@ class RssSortActivity : VMBaseActivity<RssComposeBinding, RssSortViewModel>(),
                     onSortSelected = ::selectSort,
                     onRefresh = ::refreshArticles,
                     onLoadMore = { activeArticleModel?.let(::loadMore) },
+                    onJumpToPage = ::jumpToPage,
+                    onSelectLayoutStyle = ::selectLayoutStyle,
                     onRetry = ::retryArticles,
                     onOpenArticle = { ReadRss.readRss(this, it, viewModel.rssSource) },
                     onSearchQueryChange = { searchQuery = it },
@@ -219,6 +223,7 @@ class RssSortActivity : VMBaseActivity<RssComposeBinding, RssSortViewModel>(),
                     loadingMore = state.loadingMore
                     hasMore = state.hasMore
                     loadError = state.error
+                    currentPage = state.page.coerceAtLeast(1)
                 }
             }
             collectArticles(source.sourceUrl, sort.first, model)
@@ -240,6 +245,22 @@ class RssSortActivity : VMBaseActivity<RssComposeBinding, RssSortViewModel>(),
         if (refreshing || loadingMore || !hasMore || loadError != null || articleFlowError != null) return
         val source = viewModel.rssSource ?: return
         model.loadMore(source)
+    }
+
+    private fun jumpToPage(page: Int) {
+        if (refreshing || loadingMore || page <= 0) return
+        val source = viewModel.rssSource ?: return
+        val model = activeArticleModel ?: return
+        if (page == currentPage + 1 && hasMore) {
+            model.loadMore(source)
+        } else {
+            model.jumpToPage(source, page)
+        }
+    }
+
+    private fun selectLayoutStyle(style: Int) {
+        viewModel.setLayoutStyle(style)
+        articleStyle = viewModel.articleStyle ?: style
     }
 
     private fun retryArticles() {

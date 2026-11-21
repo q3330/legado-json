@@ -267,6 +267,10 @@
             android:name=".ui.book.source.manage.BookSourceCheckActivity"
             android:launchMode="singleTop"
             android:screenOrientation="behind" />
+        <activity
+            android:name=".ui.rss.source.manage.RssSourceCheckActivity"
+            android:launchMode="singleTop"
+            android:screenOrientation="behind" />
         <!-- 订阅源管理 -->
         <activity
             android:name=".ui.rss.source.manage.RssSourceActivity"
@@ -365,6 +369,11 @@
         <!-- 字典管理 -->
         <activity
             android:name=".ui.dict.rule.DictRuleActivity"
+            android:configChanges="orientation|screenSize"
+            android:hardwareAccelerated="true" />
+        <!-- 翻译接口 -->
+        <activity
+            android:name=".ui.config.translate.TranslateConfigActivity"
             android:configChanges="orientation|screenSize"
             android:hardwareAccelerated="true" />
         <!-- 文件管理 -->

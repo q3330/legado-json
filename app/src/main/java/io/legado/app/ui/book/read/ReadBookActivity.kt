@@ -731,6 +731,15 @@ class ReadBookActivity : BaseReadBookActivity(),
         showDownloadDialog()
     }
 
+    override fun onHeaderTranslate() {
+        val book = ReadBook.book ?: return
+        val next = !io.legado.app.help.translate.TranslateConfig.isBookContentTranslateEnabled(book.bookUrl)
+        io.legado.app.help.translate.TranslateConfig.setBookContentTranslateEnabled(book.bookUrl, next)
+        binding.readMenu.updateTranslateIconState()
+        toastOnUi(if (next) "已开启正文自动翻译" else "已关闭正文自动翻译")
+        ReadBook.loadContent(resetPageOffset = false)
+    }
+
     private fun showChapterChangeSource() = lifecycleScope.launch {
         val book = ReadBook.book ?: return@launch
         if (!book.menuCapabilities.changeSource) return@launch

@@ -6,6 +6,10 @@ import io.legado.app.base.BaseViewModel
 import io.legado.app.data.appDb
 import io.legado.app.data.entities.RssSource
 import io.legado.app.help.DefaultData
+import io.legado.app.help.source.RssCheckOptions
+import io.legado.app.help.source.RssSourceChecker
+import io.legado.app.help.source.RssSourceDedupe
+import io.legado.app.help.source.RssSourceDedupeMode
 import io.legado.app.help.source.SourceHelp
 import io.legado.app.utils.FileUtils
 import io.legado.app.utils.GSON
@@ -22,6 +26,10 @@ import java.util.Locale
  * 修改数据要copy,直接修改会导致界面不刷新
  */
 class RssSourceViewModel(application: Application) : BaseViewModel(application) {
+
+    companion object {
+        private const val SQL_CHUNK_SIZE = 500
+    }
 
     fun topSource(vararg sources: RssSource) {
         execute {
@@ -66,21 +74,108 @@ class RssSourceViewModel(application: Application) : BaseViewModel(application) 
     }
 
     fun enableSelection(sources: List<RssSource>) {
+        val urls = sources.asSequence().filter { !it.enabled }.map(RssSource::sourceUrl).distinct().toList()
+        if (urls.isEmpty()) return
         execute {
-            val array = Array(sources.size) {
-                sources[it].copy(enabled = true)
+            appDb.runInTransaction {
+                urls.chunked(SQL_CHUNK_SIZE).forEach { chunk ->
+                    appDb.rssSourceDao.enableByUrls(chunk, true)
+                }
             }
-            appDb.rssSourceDao.update(*array)
         }
     }
 
     fun disableSelection(sources: List<RssSource>) {
+        val urls = sources.asSequence().filter { it.enabled }.map(RssSource::sourceUrl).distinct().toList()
+        if (urls.isEmpty()) return
         execute {
-            val array = Array(sources.size) {
-                sources[it].copy(enabled = false)
+            appDb.runInTransaction {
+                urls.chunked(SQL_CHUNK_SIZE).forEach { chunk ->
+                    appDb.rssSourceDao.enableByUrls(chunk, false)
+                }
             }
-            appDb.rssSourceDao.update(*array)
         }
+    }
+
+    fun updateSelectionType(sources: List<RssSource>, type: Int) {
+        val urls = sources.asSequence().filter { it.type != type }.map(RssSource::sourceUrl).distinct().toList()
+        if (urls.isEmpty()) return
+        execute {
+            appDb.runInTransaction {
+                urls.chunked(SQL_CHUNK_SIZE).forEach { chunk ->
+                    appDb.rssSourceDao.updateTypeByUrls(chunk, type)
+                }
+            }
+        }
+    }
+
+    fun clearSelectionGroups(sources: List<RssSource>) {
+        val urls = sources.asSequence()
+            .filter { !it.sourceGroup.isNullOrBlank() }
+            .map(RssSource::sourceUrl)
+            .distinct()
+            .toList()
+        if (urls.isEmpty()) return
+        execute {
+            appDb.runInTransaction {
+                urls.chunked(SQL_CHUNK_SIZE).forEach { chunk ->
+                    appDb.rssSourceDao.clearGroupsByUrls(chunk)
+                }
+            }
+        }
+    }
+
+    fun applyDedupeAutoDisable(
+        mode: RssSourceDedupeMode,
+        preferredPrimaries: Map<String, String>,
+        promotedPrimaryUrl: String? = null,
+        onComplete: ((disabledCount: Int) -> Unit)? = null,
+    ) {
+        if (mode == RssSourceDedupeMode.NONE) return
+        execute {
+            val allSources = appDb.rssSourceDao.all
+            if (allSources.size <= 1) return@execute 0
+            val tree = RssSourceDedupe.buildTree(allSources, mode, preferredPrimaries)
+            val urlsToDisable = ArrayList<String>()
+            var shouldEnablePromoted = false
+            for (node in tree) {
+                if (!node.hasDuplicates) continue
+                val primary = node.primary
+                if (promotedPrimaryUrl != null && primary.sourceUrl == promotedPrimaryUrl && !primary.enabled) {
+                    shouldEnablePromoted = true
+                }
+                for (candidate in node.allSources) {
+                    if (candidate.sourceUrl == primary.sourceUrl) continue
+                    if (candidate.enabled) {
+                        urlsToDisable.add(candidate.sourceUrl)
+                    }
+                }
+            }
+            if (shouldEnablePromoted && promotedPrimaryUrl != null) {
+                appDb.rssSourceDao.enable(promotedPrimaryUrl, true)
+            }
+            if (urlsToDisable.isNotEmpty()) {
+                urlsToDisable.chunked(SQL_CHUNK_SIZE).forEach { chunk ->
+                    appDb.rssSourceDao.enableByUrls(chunk, false)
+                }
+            }
+            urlsToDisable.size
+        }.onSuccess { disabledCount ->
+            onComplete?.invoke(disabledCount)
+        }
+    }
+
+    fun checkSelection(sources: List<RssSource>, options: RssCheckOptions) {
+        if (sources.isEmpty()) return
+        RssSourceChecker.start(sources, options)
+    }
+
+    fun stopCheck() {
+        RssSourceChecker.stop()
+    }
+
+    fun dismissCheck() {
+        RssSourceChecker.dismiss()
     }
 
     fun saveToFile(sources: List<RssSource>, success: (file: File, name: String) -> Unit) {
@@ -104,6 +199,7 @@ class RssSourceViewModel(application: Application) : BaseViewModel(application) 
     }
 
     fun selectionAddToGroups(sources: List<RssSource>, groups: String) {
+        if (sources.isEmpty()) return
         execute {
             val array = Array(sources.size) {
                 sources[it].copy().addGroup(groups)
@@ -113,6 +209,7 @@ class RssSourceViewModel(application: Application) : BaseViewModel(application) 
     }
 
     fun selectionRemoveFromGroups(sources: List<RssSource>, groups: String) {
+        if (sources.isEmpty()) return
         execute {
             val array = Array(sources.size) {
                 sources[it].copy().removeGroup(groups)
@@ -148,16 +245,14 @@ class RssSourceViewModel(application: Application) : BaseViewModel(application) 
 
     fun delGroup(group: String) {
         execute {
-            execute {
-                val sources = appDb.rssSourceDao.getByGroup(group)
-                sources.forEach { source ->
-                    source.sourceGroup?.splitNotBlank(",")?.toHashSet()?.let {
-                        it.remove(group)
-                        source.sourceGroup = TextUtils.join(",", it)
-                    }
+            val sources = appDb.rssSourceDao.getByGroup(group)
+            sources.forEach { source ->
+                source.sourceGroup?.splitNotBlank(",")?.toHashSet()?.let {
+                    it.remove(group)
+                    source.sourceGroup = TextUtils.join(",", it).takeIf(String::isNotBlank)
                 }
-                appDb.rssSourceDao.update(*sources.toTypedArray())
             }
+            appDb.rssSourceDao.update(*sources.toTypedArray())
         }
     }
 
@@ -169,8 +264,7 @@ class RssSourceViewModel(application: Application) : BaseViewModel(application) 
 
     fun disable(rssSource: RssSource) {
         execute {
-            rssSource.enabled = false
-            appDb.rssSourceDao.update(rssSource)
+            appDb.rssSourceDao.enable(rssSource.sourceUrl, false)
         }
     }
 

@@ -13,6 +13,7 @@ class SourceInteractionPolicy(
     blockDialogs: Boolean,
     val blockMediaLaunches: Boolean = false,
     val throwOnBlocked: Boolean = false,
+    val blockBrowserOnly: Boolean = false,
 ) : AbstractCoroutineContextElement(Key) {
 
     private val blockDialogsState = AtomicBoolean(blockDialogs)
@@ -30,10 +31,8 @@ class SourceInteractionPolicy(
 
     fun shouldBlock(kind: SourceInteractionKind): Boolean {
         return when (kind) {
-            SourceInteractionKind.BROWSER,
-            SourceInteractionKind.BROWSER_VERIFICATION -> {
-                blockDialogs
-            }
+            SourceInteractionKind.BROWSER -> blockDialogs || blockBrowserOnly
+            SourceInteractionKind.BROWSER_VERIFICATION -> blockDialogs
             SourceInteractionKind.VERIFICATION_CODE -> blockDialogs
             SourceInteractionKind.VIDEO_PLAYER -> blockMediaLaunches
         }

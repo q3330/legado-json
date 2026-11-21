@@ -26,9 +26,11 @@ import io.legado.app.exception.NoStackTraceException
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.addType
 import io.legado.app.help.book.getExportFileName
+import io.legado.app.help.book.isAudio
 import io.legado.app.help.book.isLocal
 import io.legado.app.help.book.isNotShelf
 import io.legado.app.help.book.isSameNameAuthor
+import io.legado.app.help.book.isVideo
 import io.legado.app.help.book.isWebFile
 import io.legado.app.help.book.removeType
 import io.legado.app.help.book.updateTo
@@ -62,6 +64,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.launch
@@ -881,6 +884,9 @@ class BookInfoViewModel(application: Application) : BaseViewModel(application) {
                 }
                 success?.invoke(if (savesDisplayedBook) getBook(false) ?: saved else saved)
             }
+        }.onError {
+            AppLog.put("保存书籍失败\n${it.localizedMessage}", it)
+            context.toastOnUi(it.localizedMessage ?: "保存失败")
         }
     }
 
@@ -899,14 +905,28 @@ class BookInfoViewModel(application: Application) : BaseViewModel(application) {
         val request = bookRequests.current
         val bookUrl = getBook(false)?.bookUrl ?: return
         execute {
+            while (currentChapterList() == null && request.onlineLoad?.isActive == true && bookRequests.isCurrent(request)) {
+                delay(50)
+            }
             withRequestChapterPublication(request, bookUrl) {
                 if (!bookRequests.isCurrent(request)) return@withRequestChapterPublication false
-                val chapters = currentChapterList() ?: return@withRequestChapterPublication false
+                val current = getBook(false) ?: return@withRequestChapterPublication false
+                val chapters = currentChapterList(current)
+                if (chapters.isNullOrEmpty()) {
+                    if (current.isVideo || current.isAudio) {
+                        context.toastOnUi("未获取到剧集目录，请刷新重试")
+                        return@withRequestChapterPublication false
+                    }
+                    return@withRequestChapterPublication true
+                }
                 appDb.bookChapterDao.insert(*chapters.toTypedArray())
                 true
             }
         }.onSuccess { saved ->
             if (saved && bookRequests.isCurrent(request)) success?.invoke()
+        }.onError {
+            AppLog.put("保存目录失败\n${it.localizedMessage}", it)
+            context.toastOnUi(it.localizedMessage ?: "保存目录失败")
         }
     }
 

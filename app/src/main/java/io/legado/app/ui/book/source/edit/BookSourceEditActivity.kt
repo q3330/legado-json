@@ -26,11 +26,14 @@ import io.legado.app.data.entities.rule.SearchRule
 import io.legado.app.data.entities.rule.TocRule
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.LocalConfig
+import io.legado.app.help.source.SourceContentProbe
 import io.legado.app.ui.about.AppLogDialog
 import io.legado.app.ui.about.NetworkLogDialog
 import io.legado.app.ui.book.search.SearchActivity
 import io.legado.app.ui.book.source.debug.BookSourceDebugActivity
 import io.legado.app.ui.code.CodeEditActivity
+import io.legado.app.ui.source.edit.SOURCE_EDITOR_FETCH_SITE_NAME_ID
+import io.legado.app.ui.source.edit.SOURCE_EDITOR_SAVE_LOCAL_ID
 import io.legado.app.ui.source.edit.SourceEditorHost
 import io.legado.app.ui.login.SourceLoginActivity
 import io.legado.app.ui.qrcode.QrCodeResult
@@ -39,6 +42,7 @@ import io.legado.app.ui.widget.dialog.VariableDialog
 import io.legado.app.ui.widget.keyboard.KeyboardAssistsConfig
 import io.legado.app.ui.widget.text.EditEntity
 import io.legado.app.model.analyzeRule.AnalyzeUrl
+import io.legado.app.utils.CreateFileContract
 import io.legado.app.utils.GSON
 import io.legado.app.utils.SelectFileContract
 import io.legado.app.utils.isContentScheme
@@ -58,6 +62,7 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.ArrayDeque
+import java.util.Locale
 
 class BookSourceEditActivity :
     VMBaseActivity<ComposeActivityBinding, BookSourceEditViewModel>(imageBg = false),
@@ -82,6 +87,7 @@ class BookSourceEditActivity :
     private var groupSelectorVisible by mutableStateOf(false)
     private var groupOptions by mutableStateOf<List<String>>(emptyList())
     private var urlOptionEditorVisible by mutableStateOf(false)
+    private var fetchSiteNameDialogVisible by mutableStateOf(false)
     private var keyboardAssists by mutableStateOf<List<KeyboardAssist>>(emptyList())
     private var keyboardRowCount by mutableIntStateOf(AppConfig.showBoardLine)
     private var forceFinish = false
@@ -90,6 +96,9 @@ class BookSourceEditActivity :
     private val redoHistory = mutableMapOf<String, ArrayDeque<FieldSnapshot>>()
 
     //    private val reviewEntities: ArrayList<EditEntity> = ArrayList()
+    private val exportResult = registerForActivityResult(CreateFileContract()) {
+        it.save(this, this) { toastOnUi(R.string.export_success) }
+    }
     private val qrCodeResult = registerForActivityResult(QrCodeResult()) {
         it ?: return@registerForActivityResult
         viewModel.importSource(it) { source ->
@@ -206,10 +215,28 @@ class BookSourceEditActivity :
             }
 
             R.id.menu_set_source_variable -> setSourceVariable()
+            SOURCE_EDITOR_FETCH_SITE_NAME_ID -> fetchSiteNameDialogVisible = true
+            SOURCE_EDITOR_SAVE_LOCAL_ID -> saveSourceLocally()
             R.id.menu_search -> viewModel.save(getSource()) { source ->
                 SearchActivity.start(this, source)
             }
 
+        }
+    }
+
+    private fun saveSourceLocally() {
+        viewModel.saveToFile(getSource()) { file, name ->
+            exportResult.launch(
+                CreateFileContract.FileData(
+                    name,
+                    file,
+                    if (name.lowercase(Locale.ROOT).endsWith(".js")) {
+                        "application/javascript"
+                    } else {
+                        "application/json"
+                    },
+                )
+            )
         }
     }
 
@@ -228,7 +255,20 @@ class BookSourceEditActivity :
                     keyboardAssists = keyboardAssists,
                     keyboardRowCount = keyboardRowCount,
                     keyboardHelpActions = keyboardHelpActions(),
-                    onControlsChange = { controls = it },
+                    onControlsChange = { next ->
+                        var normalized = next
+                        val hasSearch = !findEditEntity("searchUrl")?.value.isNullOrBlank()
+                        val hasExplore = !findEditEntity("exploreUrl")?.value.isNullOrBlank()
+                        if (next.enabled && !controls.enabled && !hasSearch) {
+                            normalized = normalized.copy(enabled = false)
+                            toastOnUi("搜索地址为空，无法启用搜索")
+                        }
+                        if (next.enabledExplore && !controls.enabledExplore && !hasExplore) {
+                            normalized = normalized.copy(enabledExplore = false)
+                            toastOnUi("发现地址为空，无法启用发现")
+                        }
+                        controls = normalized
+                    },
                     onTabSelected = ::setEditEntities,
                     onBack = ::finish,
                     onAction = ::onEditorAction,
@@ -270,6 +310,30 @@ class BookSourceEditActivity :
                         onConfirm = { input ->
                             urlOptionEditorVisible = false
                             insertUrlOption(input)
+                        },
+                    )
+                }
+                if (fetchSiteNameDialogVisible) {
+                    val currentSourceUrl = findEditEntity("bookSourceUrl")?.value.orEmpty()
+                    BookSourceFetchSiteNameDialog(
+                        initialUrl = currentSourceUrl,
+                        onDismiss = { fetchSiteNameDialogVisible = false },
+                        onFetchName = { targetUrl ->
+                            withContext(IO) {
+                                val tempSource = getSource().apply {
+                                    bookSourceUrl = targetUrl
+                                }
+                                SourceContentProbe.fetchWebsiteTitle(tempSource)
+                            }
+                        },
+                        onWriteName = { siteName ->
+                            replaceFieldValue(
+                                key = "bookSourceName",
+                                value = siteName,
+                                start = siteName.length,
+                                end = siteName.length,
+                            )
+                            fetchSiteNameDialogVisible = false
                         },
                     )
                 }

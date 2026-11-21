@@ -22,6 +22,7 @@ import io.legado.app.ui.design.theme.NgAppTheme
 import io.legado.app.ui.file.FileManageActivity
 import io.legado.app.ui.main.MainActivity
 import io.legado.app.ui.main.MainFragmentInterface
+import io.legado.app.ui.rss.source.manage.RssSourceActivity
 import io.legado.app.utils.LogUtils
 import io.legado.app.utils.startActivity
 
@@ -86,6 +87,7 @@ class MyFragment() : Fragment(), MainFragmentInterface,
     private fun handleAction(action: MyMenuAction) {
         when (action) {
             MyMenuAction.BOOK_SOURCE -> startActivity<BookSourceActivity>()
+            MyMenuAction.RSS_SOURCE -> startActivity<RssSourceActivity>()
             MyMenuAction.RULE -> startActivity<ConfigActivity> {
                 putExtra("configTag", ConfigTag.RULE_CONFIG)
             }
@@ -105,8 +107,20 @@ class MyFragment() : Fragment(), MainFragmentInterface,
             MyMenuAction.APPEARANCE -> startActivity<ConfigActivity> {
                 putExtra("configTag", ConfigTag.APPEARANCE_CONFIG)
             }
-            MyMenuAction.SETTINGS -> startActivity<ConfigActivity> {
-                putExtra("configTag", ConfigTag.SETTINGS_CONFIG)
+            MyMenuAction.INTERFACE -> startActivity<ConfigActivity> {
+                putExtra("configTag", ConfigTag.INTERFACE_CONFIG)
+            }
+            MyMenuAction.COVER -> startActivity<ConfigActivity> {
+                putExtra("configTag", ConfigTag.COVER_CONFIG)
+            }
+            MyMenuAction.GENERAL -> startActivity<ConfigActivity> {
+                putExtra("configTag", ConfigTag.GENERAL_CONFIG)
+            }
+            MyMenuAction.STORAGE -> startActivity<ConfigActivity> {
+                putExtra("configTag", ConfigTag.STORAGE_CONFIG)
+            }
+            MyMenuAction.ADVANCED -> startActivity<ConfigActivity> {
+                putExtra("configTag", ConfigTag.ADVANCED_CONFIG)
             }
             MyMenuAction.BOOKMARK -> startActivity<AllBookmarkActivity>()
             MyMenuAction.FILE_MANAGE -> startActivity<FileManageActivity>()

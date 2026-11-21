@@ -82,11 +82,25 @@ object SourceHelp {
     private fun deleteBookSourceKeys(sourceKeys: List<String>) {
         if (sourceKeys.isEmpty()) return
         appDb.runInTransaction {
-            appDb.bookSourceDao.deleteByKeysChunked(sourceKeys)
+            val keySet = sourceKeys as? Set<String> ?: sourceKeys.toHashSet()
+            val existingKeys = appDb.bookSourceDao.allKeys()
+            val deletingAll = existingKeys.all { it in keySet }
+            if (deletingAll) {
+                if (existingKeys.isNotEmpty()) {
+                    appDb.bookSourceDao.deleteAll()
+                }
+            } else {
+                appDb.bookSourceDao.deleteByKeysChunked(sourceKeys)
+            }
             val cacheKeys = appDb.cacheDao.allKeys()
             appDb.cacheDao.deleteSourceVariables(sourceKeys, cacheKeys)
-            BookSourceCookieStore.clear(sourceKeys)
-            BookSourceCacheStore.clear(sourceKeys, cacheKeys)
+            if (deletingAll) {
+                BookSourceCookieStore.clearAll()
+                BookSourceCacheStore.clearAll(cacheKeys)
+            } else {
+                BookSourceCookieStore.clear(sourceKeys)
+                BookSourceCacheStore.clear(sourceKeys, cacheKeys)
+            }
             SourceConfig.removeSources(sourceKeys)
         }
     }

@@ -9,9 +9,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -35,6 +38,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import io.legado.app.R
+import io.legado.app.constant.BookSourceType
 import io.legado.app.model.CheckSource
 import io.legado.app.ui.design.components.NgButtonVariant
 import io.legado.app.ui.design.components.NgDialogVariant
@@ -53,44 +57,57 @@ internal data class BookSourceCheckDialogResult(
     val timeoutSeconds: Long,
     val writeSourceComment: Boolean,
     val checkDomain: Boolean,
+    val syncSiteName: Boolean,
     val checkSearch: Boolean,
     val checkDiscovery: Boolean,
     val checkInfo: Boolean,
     val checkCategory: Boolean,
     val checkContent: Boolean,
     val blockSourceDialogs: Boolean,
+    val textMinLength: Int,
+    val checkImageReachable: Boolean,
+    val imageSampleCount: Int,
+    val checkAudioReachable: Boolean,
+    val checkVideoReachable: Boolean,
+    val checkFileDownloadReachable: Boolean,
 )
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun BookSourceCheckDialog(
+    targetType: Int? = null,
     onDismiss: () -> Unit,
     onConfirm: (BookSourceCheckDialogResult) -> Unit,
 ) {
+    val isFileOnly = targetType == BookSourceType.file
     var keyword by remember { mutableStateOf(CheckSource.keyword) }
     var timeoutText by remember { mutableStateOf((CheckSource.timeout / 1000).toString()) }
     var timeoutError by remember { mutableStateOf(false) }
     var advancedExpanded by remember { mutableStateOf(false) }
     var writeSourceComment by remember { mutableStateOf(CheckSource.wSourceComment) }
     var checkDomain by remember { mutableStateOf(CheckSource.checkDomain) }
+    var syncSiteName by remember { mutableStateOf(CheckSource.syncSiteName) }
     var checkSearch by remember { mutableStateOf(CheckSource.checkSearch) }
     var checkDiscovery by remember { mutableStateOf(CheckSource.checkDiscovery) }
     var checkInfo by remember { mutableStateOf(CheckSource.checkInfo) }
     var checkCategory by remember { mutableStateOf(CheckSource.checkCategory) }
     var checkContent by remember { mutableStateOf(CheckSource.checkContent) }
     var blockSourceDialogs by remember { mutableStateOf(CheckSource.blockSourceDialogs) }
+    var textMinLengthText by remember { mutableStateOf(CheckSource.textMinLength.toString()) }
+    var checkImageReachable by remember { mutableStateOf(CheckSource.checkImageReachable) }
+    val imageSampleCount = CheckSource.imageSampleCount.coerceIn(1, 5)
+    var checkAudioReachable by remember { mutableStateOf(CheckSource.checkAudioReachable) }
+    var checkVideoReachable by remember { mutableStateOf(CheckSource.checkVideoReachable) }
+    var checkFileDownloadReachable by remember { mutableStateOf(CheckSource.checkFileDownloadReachable) }
 
     val infoEnabled = checkSearch || checkDiscovery
     val categoryEnabled = infoEnabled && checkInfo
-    val contentEnabled = categoryEnabled && checkCategory
-    val selectedItemCount = listOf(
-        checkDomain,
-        checkSearch,
-        checkDiscovery,
-        checkInfo,
-        checkCategory,
-        checkContent,
-    ).count { it }
+    val contentEnabled = if (isFileOnly) infoEnabled && checkInfo else categoryEnabled && checkCategory
+    val selectedItemCount = if (isFileOnly) {
+        listOf(checkDomain, checkSearch, checkDiscovery, checkInfo, checkContent).count { it }
+    } else {
+        listOf(checkDomain, checkSearch, checkDiscovery, checkInfo, checkCategory, checkContent).count { it }
+    }
 
     fun disableInfoSection() {
         checkInfo = false
@@ -151,12 +168,19 @@ internal fun BookSourceCheckDialog(
                 timeoutSeconds = timeoutSeconds,
                 writeSourceComment = writeSourceComment,
                 checkDomain = checkDomain,
+                syncSiteName = syncSiteName,
                 checkSearch = checkSearch,
                 checkDiscovery = checkDiscovery,
                 checkInfo = checkInfo,
                 checkCategory = checkCategory,
                 checkContent = checkContent,
                 blockSourceDialogs = blockSourceDialogs,
+                textMinLength = textMinLengthText.toIntOrNull()?.coerceAtLeast(0) ?: 0,
+                checkImageReachable = checkImageReachable,
+                imageSampleCount = imageSampleCount,
+                checkAudioReachable = checkAudioReachable,
+                checkVideoReachable = checkVideoReachable,
+                checkFileDownloadReachable = checkFileDownloadReachable,
             )
         )
     }
@@ -166,7 +190,7 @@ internal fun BookSourceCheckDialog(
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         NgDialog(
-            title = stringResource(R.string.check_select_source),
+            title = stringResource(checkSourceActionLabelRes(targetType)),
             modifier = Modifier
                 .padding(horizontal = 18.dp)
                 .widthIn(max = 520.dp),
@@ -189,131 +213,253 @@ internal fun BookSourceCheckDialog(
                 )
             },
         ) {
-            BookSourceCheckUnderlinedField(
-                label = stringResource(R.string.search_book_key),
-                value = keyword,
-                onValueChange = { keyword = it },
-            )
-            Spacer(Modifier.height(12.dp))
-            Row(
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(52.dp)
-                    .clickable { advancedExpanded = !advancedExpanded }
-                    .padding(horizontal = 2.dp),
-                verticalAlignment = Alignment.CenterVertically,
+                    .heightIn(max = 520.dp)
+                    .verticalScroll(rememberScrollState()),
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = stringResource(R.string.book_source_check_advanced),
-                        color = Color(NgTheme.colors.onSurface),
-                        fontSize = 15.sp,
-                        lineHeight = 19.sp,
-                        fontWeight = FontWeight.Medium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    if (!advancedExpanded) {
+                BookSourceCheckUnderlinedField(
+                    label = stringResource(R.string.search_book_key),
+                    value = keyword,
+                    onValueChange = { keyword = it },
+                )
+                Spacer(Modifier.height(10.dp))
+                when (targetType) {
+                    null -> {
                         Text(
-                            text = stringResource(
-                                R.string.book_source_check_advanced_summary,
-                                timeoutText.toLongOrNull() ?: 0L,
-                                selectedItemCount,
-                            ),
-                            modifier = Modifier.padding(top = 2.dp),
-                            color = Color(NgTheme.colors.primary),
+                            text = stringResource(R.string.book_source_check_auto_type_hint),
+                            modifier = Modifier.padding(horizontal = 2.dp, vertical = 2.dp),
+                            color = Color(NgTheme.colors.onSurfaceVariant),
                             fontSize = 12.sp,
-                            lineHeight = 16.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
+                            lineHeight = 17.sp,
+                        )
+                    }
+                    BookSourceType.default -> {
+                        BookSourceCheckUnderlinedField(
+                            label = stringResource(R.string.book_source_check_text_min_length),
+                            value = textMinLengthText,
+                            onValueChange = { value -> textMinLengthText = value.filter(Char::isDigit) },
+                            keyboardType = KeyboardType.Number,
+                            onDone = ::confirm,
+                        )
+                    }
+                    BookSourceType.image -> {
+                        NgFormSwitchSettingRow(
+                            title = stringResource(R.string.book_source_check_image_reachable),
+                            summary = stringResource(
+                                R.string.book_source_check_image_reachable_summary,
+                                imageSampleCount,
+                            ),
+                            checked = checkImageReachable,
+                            onCheckedChange = { checkImageReachable = it },
+                        )
+                    }
+                    BookSourceType.audio -> {
+                        NgFormSwitchSettingRow(
+                            title = stringResource(R.string.book_source_check_audio_reachable),
+                            summary = stringResource(R.string.book_source_check_audio_reachable_summary),
+                            checked = checkAudioReachable,
+                            onCheckedChange = { checkAudioReachable = it },
+                        )
+                    }
+                    BookSourceType.video -> {
+                        NgFormSwitchSettingRow(
+                            title = stringResource(R.string.book_source_check_video_reachable),
+                            summary = stringResource(R.string.book_source_check_video_reachable_summary),
+                            checked = checkVideoReachable,
+                            onCheckedChange = { checkVideoReachable = it },
+                        )
+                    }
+                    BookSourceType.file -> {
+                        NgFormSwitchSettingRow(
+                            title = stringResource(R.string.book_source_check_file_reachable),
+                            summary = stringResource(R.string.book_source_check_file_reachable_summary),
+                            checked = checkFileDownloadReachable,
+                            onCheckedChange = { checkFileDownloadReachable = it },
                         )
                     }
                 }
-                Icon(
-                    painter = painterResource(R.drawable.ic_chevron_right_20),
-                    contentDescription = null,
-                    tint = Color(NgTheme.colors.onSurfaceVariant),
-                    modifier = Modifier
-                        .size(20.dp)
-                        .rotate(if (advancedExpanded) 90f else 0f),
-                )
-            }
-            if (advancedExpanded) {
-                Spacer(Modifier.height(4.dp))
-                BookSourceCheckUnderlinedField(
-                    label = stringResource(R.string.check_source_timeout),
-                    value = timeoutText,
-                    onValueChange = { value ->
-                        timeoutText = value.filter(Char::isDigit)
-                        timeoutError = false
-                    },
-                    isError = timeoutError,
-                    supportingText = if (timeoutError) {
-                        stringResource(R.string.book_source_check_timeout_error)
-                    } else {
-                        null
-                    },
-                    keyboardType = KeyboardType.Number,
-                    onDone = ::confirm,
-                )
                 Spacer(Modifier.height(6.dp))
-                NgFormSwitchSettingRow(
-                    title = stringResource(R.string.write_source_comment),
-                    checked = writeSourceComment,
-                    onCheckedChange = { writeSourceComment = it },
-                )
-                NgFormSwitchSettingRow(
-                    title = stringResource(R.string.book_source_check_block_dialogs),
-                    summary = stringResource(R.string.book_source_check_block_dialogs_summary),
-                    checked = blockSourceDialogs,
-                    onCheckedChange = { blockSourceDialogs = it },
-                )
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    text = stringResource(R.string.check_source_item),
-                    modifier = Modifier.padding(horizontal = 2.dp, vertical = 2.dp),
-                    color = Color(NgTheme.colors.primary),
-                    fontSize = 13.sp,
-                    lineHeight = 17.sp,
-                    fontWeight = FontWeight.Medium,
-                )
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp)
+                        .clickable { advancedExpanded = !advancedExpanded }
+                        .padding(horizontal = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    BookSourceCheckOption(
-                        text = stringResource(R.string.domain),
-                        checked = checkDomain,
-                        onToggle = ::toggleDomain,
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.book_source_check_advanced),
+                            color = Color(NgTheme.colors.onSurface),
+                            fontSize = 15.sp,
+                            lineHeight = 19.sp,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (!advancedExpanded) {
+                            Text(
+                                text = stringResource(
+                                    R.string.book_source_check_advanced_summary,
+                                    timeoutText.toLongOrNull() ?: 0L,
+                                    selectedItemCount,
+                                ),
+                                modifier = Modifier.padding(top = 2.dp),
+                                color = Color(NgTheme.colors.primary),
+                                fontSize = 12.sp,
+                                lineHeight = 16.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                    Icon(
+                        painter = painterResource(R.drawable.ic_chevron_right_20),
+                        contentDescription = null,
+                        tint = Color(NgTheme.colors.onSurfaceVariant),
+                        modifier = Modifier
+                            .size(20.dp)
+                            .rotate(if (advancedExpanded) 90f else 0f),
                     )
-                    BookSourceCheckOption(
-                        text = stringResource(R.string.search),
-                        checked = checkSearch,
-                        onToggle = ::toggleSearch,
+                }
+                if (advancedExpanded) {
+                    Spacer(Modifier.height(4.dp))
+                    BookSourceCheckUnderlinedField(
+                        label = stringResource(R.string.check_source_timeout),
+                        value = timeoutText,
+                        onValueChange = { value ->
+                            timeoutText = value.filter(Char::isDigit)
+                            timeoutError = false
+                        },
+                        isError = timeoutError,
+                        supportingText = if (timeoutError) {
+                            stringResource(R.string.book_source_check_timeout_error)
+                        } else {
+                            null
+                        },
+                        keyboardType = KeyboardType.Number,
+                        onDone = ::confirm,
                     )
-                    BookSourceCheckOption(
-                        text = stringResource(R.string.discovery),
-                        checked = checkDiscovery,
-                        onToggle = ::toggleDiscovery,
+                    Spacer(Modifier.height(6.dp))
+                    NgFormSwitchSettingRow(
+                        title = stringResource(R.string.write_source_comment),
+                        checked = writeSourceComment,
+                        onCheckedChange = { writeSourceComment = it },
                     )
-                    BookSourceCheckOption(
-                        text = stringResource(R.string.source_tab_info),
-                        checked = checkInfo,
-                        enabled = infoEnabled,
-                        onToggle = ::toggleInfo,
+                    NgFormSwitchSettingRow(
+                        title = stringResource(R.string.book_source_check_block_dialogs),
+                        summary = stringResource(R.string.book_source_check_block_dialogs_summary),
+                        checked = blockSourceDialogs,
+                        onCheckedChange = { blockSourceDialogs = it },
                     )
-                    BookSourceCheckOption(
-                        text = stringResource(R.string.chapter_list),
-                        checked = checkCategory,
-                        enabled = categoryEnabled,
-                        onToggle = ::toggleCategory,
+                    if (targetType == null) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = stringResource(R.string.book_source_check_type_section),
+                            modifier = Modifier.padding(horizontal = 2.dp, vertical = 2.dp),
+                            color = Color(NgTheme.colors.primary),
+                            fontSize = 13.sp,
+                            lineHeight = 17.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                        BookSourceCheckUnderlinedField(
+                            label = stringResource(R.string.book_source_check_text_min_length),
+                            value = textMinLengthText,
+                            onValueChange = { value -> textMinLengthText = value.filter(Char::isDigit) },
+                            keyboardType = KeyboardType.Number,
+                            onDone = ::confirm,
+                        )
+                        NgFormSwitchSettingRow(
+                            title = stringResource(R.string.book_source_check_image_reachable),
+                            summary = stringResource(
+                                R.string.book_source_check_image_reachable_summary,
+                                imageSampleCount,
+                            ),
+                            checked = checkImageReachable,
+                            onCheckedChange = { checkImageReachable = it },
+                        )
+                        NgFormSwitchSettingRow(
+                            title = stringResource(R.string.book_source_check_audio_reachable),
+                            summary = stringResource(R.string.book_source_check_audio_reachable_summary),
+                            checked = checkAudioReachable,
+                            onCheckedChange = { checkAudioReachable = it },
+                        )
+                        NgFormSwitchSettingRow(
+                            title = stringResource(R.string.book_source_check_video_reachable),
+                            summary = stringResource(R.string.book_source_check_video_reachable_summary),
+                            checked = checkVideoReachable,
+                            onCheckedChange = { checkVideoReachable = it },
+                        )
+                        NgFormSwitchSettingRow(
+                            title = stringResource(R.string.book_source_check_file_reachable),
+                            summary = stringResource(R.string.book_source_check_file_reachable_summary),
+                            checked = checkFileDownloadReachable,
+                            onCheckedChange = { checkFileDownloadReachable = it },
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = stringResource(R.string.check_source_item),
+                        modifier = Modifier.padding(horizontal = 2.dp, vertical = 2.dp),
+                        color = Color(NgTheme.colors.primary),
+                        fontSize = 13.sp,
+                        lineHeight = 17.sp,
+                        fontWeight = FontWeight.Medium,
                     )
-                    BookSourceCheckOption(
-                        text = stringResource(R.string.main_body),
-                        checked = checkContent,
-                        enabled = contentEnabled,
-                        onToggle = { checkContent = !checkContent },
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        BookSourceCheckOption(
+                            text = stringResource(R.string.domain),
+                            checked = checkDomain,
+                            onToggle = ::toggleDomain,
+                        )
+                        BookSourceCheckOption(
+                            text = stringResource(R.string.search),
+                            checked = checkSearch,
+                            onToggle = ::toggleSearch,
+                        )
+                        BookSourceCheckOption(
+                            text = stringResource(R.string.discovery),
+                            checked = checkDiscovery,
+                            onToggle = ::toggleDiscovery,
+                        )
+                        BookSourceCheckOption(
+                            text = stringResource(R.string.source_tab_info),
+                            checked = checkInfo,
+                            enabled = infoEnabled,
+                            onToggle = ::toggleInfo,
+                        )
+                        if (!isFileOnly) {
+                            BookSourceCheckOption(
+                                text = stringResource(R.string.chapter_list),
+                                checked = checkCategory,
+                                enabled = categoryEnabled,
+                                onToggle = ::toggleCategory,
+                            )
+                        }
+                        BookSourceCheckOption(
+                            text = stringResource(
+                                if (isFileOnly) R.string.book_source_check_file_download
+                                else R.string.main_body
+                            ),
+                            checked = checkContent,
+                            enabled = contentEnabled,
+                            onToggle = { checkContent = !checkContent },
+                        )
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    val syncSiteNameEnabled = checkDomain || checkSearch || checkDiscovery
+                    NgFormSwitchSettingRow(
+                        title = stringResource(R.string.book_source_check_sync_site_name),
+                        summary = stringResource(R.string.book_source_check_sync_site_name_summary),
+                        checked = syncSiteNameEnabled && syncSiteName,
+                        enabled = syncSiteNameEnabled,
+                        onCheckedChange = { syncSiteName = it },
                     )
                 }
             }

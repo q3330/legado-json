@@ -4,9 +4,13 @@ import android.annotation.SuppressLint
 import android.util.Log
 import io.legado.app.BuildConfig
 import io.legado.app.constant.AppPattern
+import io.legado.app.constant.BookSourceType
 import io.legado.app.data.entities.*
+import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.isWebFile
 import io.legado.app.help.coroutine.CompositeCoroutine
+import io.legado.app.help.coroutine.Coroutine
+import io.legado.app.help.source.SourceContentProbe
 import io.legado.app.help.source.sortUrls
 import io.legado.app.model.rss.Rss
 import io.legado.app.model.webBook.WebBook
@@ -15,8 +19,16 @@ import io.legado.app.utils.NetworkUtils
 import io.legado.app.utils.isAbsUrl
 import io.legado.app.utils.stackTraceStr
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.toList
+import java.net.ConnectException
+import java.net.SocketException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.text.SimpleDateFormat
 import java.util.*
+import javax.net.ssl.SSLException
 
 object Debug {
     var callback: Callback? = null
@@ -235,6 +247,7 @@ object Debug {
         cancelDebug()
         debugSource = bookSource.bookSourceUrl
         startTime = System.currentTimeMillis()
+        log(debugSource, "≡当前书源类型:${sourceTypeLabel(bookSource.bookSourceType)}")
         when {
             key.isAbsUrl() -> {
                 val book = Book()
@@ -290,7 +303,7 @@ object Debug {
                 }
             }
             .onError {
-                log(debugSource, it.stackTraceStr, state = -1)
+                logError(debugSource, it)
             }
         tasks.add(explore)
     }
@@ -308,9 +321,35 @@ object Debug {
                 }
             }
             .onError {
-                log(debugSource, it.stackTraceStr, state = -1)
+                logError(debugSource, it)
             }
         tasks.add(search)
+    }
+
+    private fun logError(sourceUrl: String?, throwable: Throwable) {
+        diagnoseNetworkError(throwable)?.let { hint ->
+            log(sourceUrl, "≡网络诊断:$hint")
+        }
+        log(sourceUrl, throwable.stackTraceStr, state = -1)
+    }
+
+    private fun diagnoseNetworkError(throwable: Throwable): String? {
+        val root = generateSequence(throwable) { it.cause }.last()
+        val stack = throwable.stackTraceStr
+        return when {
+            root is SocketException && root.message?.contains("Connection reset", ignoreCase = true) == true -> {
+                if (stack.contains("connectTls") || stack.contains("doHandshake") || stack.contains("Conscrypt")) {
+                    "TLS握手阶段连接被重置（目标域名可能被当前网络/运营商SNI阻断，请尝试开启代理/VPN或更换可用域名）"
+                } else {
+                    "连接被远端重置（服务器主动断开或中间网络中断，请检查网络或尝试代理）"
+                }
+            }
+            root is SSLException -> "TLS/SSL安全连接失败（证书异常或握手被拦截）"
+            root is UnknownHostException -> "域名无法解析（请检查网络、DNS或确认域名是否已失效）"
+            root is SocketTimeoutException -> "网络请求超时（目标站点响应过慢或当前网络不可达）"
+            root is ConnectException -> "无法连接到目标服务器（端口关闭、站点宕机或网络受限）"
+            else -> null
+        }
     }
 
     private fun infoDebug(scope: CoroutineScope, bookSource: BookSource, book: Book) {
@@ -328,7 +367,8 @@ object Debug {
                 if (!book.isWebFile) {
                     tocDebug(scope, bookSource, book)
                 } else {
-                    log(debugSource, "≡文件类书源跳过解析目录", state = 1000)
+                    log(debugSource, "≡文件类书源跳过解析目录")
+                    fileDownloadDebug(scope, bookSource, book)
                 }
             }
             .onError {
@@ -372,12 +412,148 @@ object Debug {
             bookChapter = bookChapter,
             nextChapterUrl = nextChapterUrl,
             needSave = false
-        ).onSuccess {
-            log(debugSource, "︽正文页解析完成", state = 1000)
+        ).onSuccess { contentStr ->
+            debugTypedContent(scope, bookSource, bookChapter, contentStr)
         }.onError {
             log(debugSource, it.stackTraceStr, state = -1)
         }
         tasks.add(content)
+    }
+
+    private fun fileDownloadDebug(
+        scope: CoroutineScope,
+        bookSource: BookSource,
+        book: Book,
+    ) {
+        val task = Coroutine.async(scope, Dispatchers.IO) {
+            val urls = book.downloadUrls
+                .orEmpty()
+                .mapNotNull(SourceContentProbe::extractFirstHttpUrl)
+                .distinct()
+            log(debugSource, "┌文件下载链接校验 (共 ${urls.size} 条)")
+            if (urls.isEmpty()) {
+                log(debugSource, "└⚠ 未提取到有效下载链接")
+                log(debugSource, "︽文件类调试完成", state = -1)
+                return@async
+            }
+            urls.take(3).forEachIndexed { idx, url ->
+                log(debugSource, "├[${idx + 1}] $url")
+            }
+            val probe = SourceContentProbe.probeUrl(
+                source = bookSource,
+                rawUrl = urls.first(),
+                referer = book.bookUrl,
+                allowHtml = true,
+            )
+            log(debugSource, "└首条下载链接探活: ${probe.formatBrief()}")
+            log(debugSource, "︽文件类调试完成", state = if (probe.ok) 1000 else -1)
+        }
+        tasks.add(task)
+    }
+
+    private fun debugTypedContent(
+        scope: CoroutineScope,
+        bookSource: BookSource,
+        bookChapter: BookChapter,
+        contentStr: String,
+    ) {
+        when (bookSource.bookSourceType) {
+            BookSourceType.image -> {
+                val task = Coroutine.async(scope, Dispatchers.IO) {
+                    val images = BookHelp.flowImages(bookChapter, contentStr)
+                        .distinctUntilChanged()
+                        .toList()
+                    log(debugSource, "┌图片正文校验 (共 ${images.size} 张)")
+                    if (images.isEmpty()) {
+                        log(debugSource, "└⚠ 正文中未解析到 <img> 图片链接")
+                        log(debugSource, "︽图片正文调试完成", state = -1)
+                        return@async
+                    }
+                    images.take(3).forEachIndexed { idx, url ->
+                        log(debugSource, "├图片[${idx + 1}]: $url")
+                    }
+                    val samples = images.take(2)
+                    var okCount = 0
+                    samples.forEachIndexed { idx, url ->
+                        val probe = SourceContentProbe.probeUrl(
+                            source = bookSource,
+                            rawUrl = url,
+                            referer = bookChapter.url,
+                            allowHtml = false,
+                        )
+                        if (probe.ok) okCount++
+                        log(debugSource, "├探活[${idx + 1}/${samples.size}]: ${probe.formatBrief()}")
+                    }
+                    log(debugSource, "└图片抽样探活结果: $okCount/${samples.size} 可达")
+                    log(debugSource, "︽正文页解析完成", state = if (okCount > 0) 1000 else -1)
+                }
+                tasks.add(task)
+            }
+
+            BookSourceType.audio -> {
+                val task = Coroutine.async(scope, Dispatchers.IO) {
+                    val audioUrl = SourceContentProbe.extractFirstHttpUrl(contentStr)
+                    log(debugSource, "┌音频流校验")
+                    if (audioUrl.isNullOrBlank()) {
+                        log(debugSource, "└⚠ 未从正文解析到有效音频 URL")
+                        log(debugSource, "︽音频正文调试完成", state = -1)
+                        return@async
+                    }
+                    log(debugSource, "├音频链接: $audioUrl")
+                    val probe = SourceContentProbe.probeUrl(
+                        source = bookSource,
+                        rawUrl = audioUrl,
+                        referer = bookChapter.url,
+                        allowHtml = false,
+                    )
+                    log(debugSource, "└音频流探活: ${probe.formatBrief()}")
+                    log(debugSource, "︽正文页解析完成", state = if (probe.ok) 1000 else -1)
+                }
+                tasks.add(task)
+            }
+
+            BookSourceType.video -> {
+                val task = Coroutine.async(scope, Dispatchers.IO) {
+                    val videoUrl = SourceContentProbe.extractFirstHttpUrl(contentStr)
+                    log(debugSource, "┌视频播放链接校验")
+                    if (videoUrl.isNullOrBlank()) {
+                        log(debugSource, "└⚠ 未从正文解析到有效视频链接")
+                        log(debugSource, "︽视频正文调试完成", state = -1)
+                        return@async
+                    }
+                    log(debugSource, "├视频链接: $videoUrl")
+                    val isDirect = SourceContentProbe.isDirectVideoStreamUrl(videoUrl)
+                    val probe = SourceContentProbe.probeUrl(
+                        source = bookSource,
+                        rawUrl = videoUrl,
+                        referer = bookChapter.url,
+                        allowHtml = !isDirect,
+                    )
+                    log(debugSource, "└视频链接探活: ${probe.formatBrief()}")
+                    log(debugSource, "︽正文页解析完成", state = if (probe.ok) 1000 else -1)
+                }
+                tasks.add(task)
+            }
+
+            else -> {
+                val plainLen = SourceContentProbe.countVisibleTextChars(contentStr)
+                log(debugSource, "┌文本正文校验")
+                if (plainLen < 50) {
+                    log(debugSource, "└⚠ 有效字数仅 $plainLen 字，可能命中反爬验证页或规则提取不全")
+                } else {
+                    log(debugSource, "└有效字数: $plainLen 字")
+                }
+                log(debugSource, "︽正文页解析完成", state = 1000)
+            }
+        }
+    }
+
+    private fun sourceTypeLabel(type: Int): String = when (type) {
+        BookSourceType.audio -> "音频类"
+        BookSourceType.image -> "图片类"
+        BookSourceType.file -> "文件类"
+        BookSourceType.video -> "视频类"
+        else -> "文本类"
     }
 
     interface Callback {

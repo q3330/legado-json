@@ -53,6 +53,8 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.legado.app.R
+import io.legado.app.ui.source.edit.SOURCE_EDITOR_FETCH_SITE_NAME_ID
+import io.legado.app.ui.source.edit.SOURCE_EDITOR_SAVE_LOCAL_ID
 import io.legado.app.ui.source.edit.SourceEditorTopBar
 import io.legado.app.data.entities.KeyboardAssist
 import io.legado.app.data.entities.RssSource
@@ -87,6 +89,8 @@ internal sealed interface RssSourceEditAction {
     data object ClearCookie : RssSourceEditAction
     data object Copy : RssSourceEditAction
     data object Paste : RssSourceEditAction
+    data object FetchSiteName : RssSourceEditAction
+    data object SaveLocal : RssSourceEditAction
     data object ImportQr : RssSourceEditAction
     data object ShareText : RssSourceEditAction
     data object ShareQr : RssSourceEditAction
@@ -144,6 +148,8 @@ internal fun RssSourceEditScreen(
             title = R.string.rss_source_edit,
             hasSearch = false,
             hasLogin = { !source.loginUrl.isNullOrBlank() },
+            hasFetchSiteName = true,
+            hasSaveLocal = true,
             autoComplete = autoComplete,
             onBack = { onAction(RssSourceEditAction.Back) },
             onAction = { id ->
@@ -158,6 +164,8 @@ internal fun RssSourceEditScreen(
                     R.id.menu_auto_complete -> onAction(RssSourceEditAction.AutoCompleteChanged(!autoComplete))
                     R.id.menu_clear_cookie -> onAction(RssSourceEditAction.ClearCookie)
                     R.id.menu_set_source_variable -> onAction(RssSourceEditAction.SetVariable)
+                    SOURCE_EDITOR_FETCH_SITE_NAME_ID -> onAction(RssSourceEditAction.FetchSiteName)
+                    SOURCE_EDITOR_SAVE_LOCAL_ID -> onAction(RssSourceEditAction.SaveLocal)
                     R.id.menu_copy_source -> onAction(RssSourceEditAction.Copy)
                     R.id.menu_paste_source -> onAction(RssSourceEditAction.Paste)
                     R.id.menu_qr_code_camera -> onAction(RssSourceEditAction.ImportQr)

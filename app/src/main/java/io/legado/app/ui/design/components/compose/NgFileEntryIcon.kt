@@ -13,6 +13,7 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalMinimumInteractiveComponentSize
+import androidx.compose.material3.TriStateCheckbox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
@@ -21,6 +22,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.colorResource
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.unit.dp
 import io.legado.app.R
 import io.legado.app.ui.design.theme.NgTheme
@@ -100,6 +102,46 @@ fun NgFileSelectionCheckbox(
         Checkbox(
             checked = checked,
             onCheckedChange = onCheckedChange,
+            enabled = enabled,
+            modifier = checkboxModifier,
+            colors = CheckboxDefaults.colors(
+                checkedColor = Color(colors.primary),
+                checkmarkColor = checkmarkColor,
+                uncheckedColor = Color(colors.onSurfaceVariant).copy(alpha = 0.62f),
+                disabledCheckedColor = Color(colors.primary).copy(alpha = 0.38f),
+                disabledUncheckedColor = Color(colors.onSurfaceVariant).copy(alpha = 0.28f),
+                disabledIndeterminateColor = Color(colors.primary).copy(alpha = 0.38f),
+            ),
+        )
+    }
+    when (variant) {
+        NgFileSelectionCheckboxVariant.STANDARD -> checkbox(modifier)
+        NgFileSelectionCheckboxVariant.COMPACT -> {
+            CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 0.dp) {
+                checkbox(
+                    modifier
+                        .size(32.dp)
+                        .scale(0.85f)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun NgFileSelectionTriStateCheckbox(
+    state: ToggleableState,
+    onClick: (() -> Unit)?,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    variant: NgFileSelectionCheckboxVariant = NgFileSelectionCheckboxVariant.STANDARD,
+    checkmarkColor: Color = Color.White,
+) {
+    val colors = NgTheme.colors
+    val checkbox: @Composable (Modifier) -> Unit = { checkboxModifier ->
+        TriStateCheckbox(
+            state = state,
+            onClick = onClick,
             enabled = enabled,
             modifier = checkboxModifier,
             colors = CheckboxDefaults.colors(

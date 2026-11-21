@@ -230,7 +230,8 @@ data class BookSource(
     fun getInvalidGroupNames(): String {
         return bookSourceGroup?.splitNotBlank(AppPattern.splitGroupRegex)?.toHashSet()?.filter {
             "失效" in it || "规则为空" in it ||
-                it == "校验超时" || it == "已阻止弹窗"
+                it == "校验超时" || it == "已阻止弹窗" ||
+                it == "非HTTP源地址" || it == "源名称获取失败"
         }?.joinToString() ?: ""
     }
 

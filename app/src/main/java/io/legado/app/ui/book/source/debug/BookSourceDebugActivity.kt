@@ -9,6 +9,7 @@ import androidx.lifecycle.lifecycleScope
 import io.legado.app.R
 import io.legado.app.base.ComposeActivityBinding
 import io.legado.app.base.VMBaseActivity
+import io.legado.app.constant.BookSourceType
 import io.legado.app.help.source.clearExploreKindsCache
 import io.legado.app.help.source.exploreKinds
 import io.legado.app.ui.about.NetworkLogDialog
@@ -37,6 +38,7 @@ class BookSourceDebugActivity :
     private var timelineItems by mutableStateOf<List<BookSourceDebugTimelineState.DebugItem>>(
         emptyList()
     )
+    private var sourceType by mutableStateOf(BookSourceType.default)
     private var sourceName = ""
 
     private val qrCodeResult = registerForActivityResult(QrCodeResult()) {
@@ -49,6 +51,7 @@ class BookSourceDebugActivity :
                 BookSourceDebugScreen(
                     query = query,
                     helpVisible = helpVisible,
+                    sourceType = sourceType,
                     searchExample = searchExample,
                     exploreExample = exploreExample,
                     exploreOptions = exploreOptions,
@@ -77,6 +80,7 @@ class BookSourceDebugActivity :
             }
         }
         viewModel.init(intent.getStringExtra("key")) {
+            sourceType = viewModel.bookSource?.bookSourceType ?: BookSourceType.default
             sourceName = viewModel.bookSource?.getDisPlayNameGroup().orEmpty()
             timelineItems = timelineState.setSourceName(sourceName)
             viewModel.bookSource?.ruleSearch?.checkKeyWord

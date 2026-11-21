@@ -40,8 +40,14 @@ class RssSourceDebugModel(application: Application) : BaseViewModel(application)
 
     override fun printLog(state: Int, msg: String) {
         when (state) {
-            10 -> listSrc = msg
-            20 -> contentSrc = msg
+            10 -> {
+                listSrc = msg
+                callback?.invoke(state, msg)
+            }
+            20 -> {
+                contentSrc = msg
+                callback?.invoke(state, msg)
+            }
             else -> callback?.invoke(state, msg)
         }
     }

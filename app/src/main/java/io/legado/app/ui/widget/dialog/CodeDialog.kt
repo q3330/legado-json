@@ -56,6 +56,7 @@ import io.legado.app.ui.design.components.compose.rememberNgCodeVisualTransforma
 import io.legado.app.ui.design.components.compose.rememberNgHighlightedCode
 import io.legado.app.ui.design.theme.NgAppTheme
 import io.legado.app.utils.exportTextContent
+import io.legado.app.utils.sendToClip
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -123,6 +124,7 @@ class CodeDialog() : DialogFragment() {
                         ?: HighlightMode.Default,
                     onValueChange = { editorValue = it },
                     onSave = ::save,
+                    onCopy = ::copy,
                     onExport = ::export,
                 )
             }
@@ -141,6 +143,15 @@ class CodeDialog() : DialogFragment() {
         (parentFragment as? Callback)?.onCodeSave(editorValue.text, requestId)
             ?: (activity as? Callback)?.onCodeSave(editorValue.text, requestId)
         dismiss()
+    }
+
+    private fun copy() {
+        lifecycleScope.launch {
+            val content = withContext(Dispatchers.Default) { exportContent() }
+            if (isAdded) {
+                requireContext().sendToClip(content)
+            }
+        }
     }
 
     private fun export() {
@@ -205,6 +216,7 @@ private fun CodeDialogContent(
     highlightMode: CodeDialog.HighlightMode,
     onValueChange: (TextFieldValue) -> Unit,
     onSave: () -> Unit,
+    onCopy: () -> Unit,
     onExport: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -236,6 +248,16 @@ private fun CodeDialogContent(
                     overflow = TextOverflow.Ellipsis,
                 )
                 if (readOnly) {
+                    TextButton(onClick = onCopy) {
+                        Text(
+                            text = stringResource(
+                                if (highlightMode == CodeDialog.HighlightMode.DebugLog) R.string.copy_log
+                                else R.string.copy_text
+                            ),
+                            color = accentColor,
+                            fontSize = 14.sp,
+                        )
+                    }
                     TextButton(onClick = onExport) {
                         Text(
                             text = stringResource(R.string.export_content),

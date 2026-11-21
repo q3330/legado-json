@@ -4,6 +4,8 @@ import android.widget.ImageView
 import androidx.appcompat.widget.AppCompatImageView
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,9 +21,11 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -41,9 +45,12 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.bumptech.glide.request.RequestOptions
 import io.legado.app.R
+import io.legado.app.data.entities.RssArticle
 import io.legado.app.data.entities.RssSource
 import io.legado.app.help.glide.ImageLoader
 import io.legado.app.help.glide.OkHttpModelLoader
+import io.legado.app.help.source.RssSourceReachability
+import io.legado.app.help.source.RssSourceReachabilityStore
 import io.legado.app.ui.design.components.compose.NgExpandableActionMenu
 import io.legado.app.ui.design.components.compose.NgExpandableActionMenuItem
 import io.legado.app.ui.design.theme.NgTheme
@@ -55,8 +62,18 @@ internal fun RssScreen(
     query: String,
     groups: List<String>,
     selectedGroup: String?,
+    modernStyle: Boolean,
+    modernState: RssModernUiState,
     bottomInsetPx: Int,
     transparentTopBar: Boolean,
+    onToggleModernStyle: () -> Unit,
+    onModernSelectSource: (RssSource) -> Unit,
+    onModernSelectSort: (Int) -> Unit,
+    onModernRefresh: () -> Unit,
+    onModernLoadMore: () -> Unit,
+    onModernJumpToPage: (Int) -> Unit,
+    onModernSelectLayoutStyle: (Int) -> Unit,
+    onModernOpenArticle: (RssArticle) -> Unit,
     onQueryChange: (String) -> Unit,
     onGroupSelected: (String?) -> Unit,
     onOpenRuleSubscription: () -> Unit,
@@ -66,6 +83,13 @@ internal fun RssScreen(
     onSourceAction: (RssSource, Int) -> Unit
 ) {
     val bottomInset = with(LocalDensity.current) { bottomInsetPx.toDp() }
+    val reachabilityMap by RssSourceReachabilityStore.statusFlow.collectAsState()
+    var sourcePickerVisible by remember { mutableStateOf(false) }
+    var categoriesExpanded by remember(modernState.selectedSourceUrl) { mutableStateOf(false) }
+    var categoryAnchorX by remember { mutableStateOf<Float?>(null) }
+    val selectedModernSource = remember(sources, modernState.selectedSourceUrl) {
+        sources.firstOrNull { it.sourceUrl == modernState.selectedSourceUrl } ?: sources.firstOrNull()
+    }
 
     Column(
         modifier = Modifier
@@ -76,38 +100,69 @@ internal fun RssScreen(
             query = query,
             groups = groups,
             selectedGroup = selectedGroup,
+            modernStyle = modernStyle,
+            currentSourceUrl = selectedModernSource?.sourceUrl,
+            currentSourceName = selectedModernSource?.sourceName.orEmpty(),
+            categoriesExpanded = categoriesExpanded,
+            onOpenSourcePicker = { sourcePickerVisible = true },
+            onToggleCategories = { categoriesExpanded = !categoriesExpanded },
+            onCategoryAnchorPosition = { categoryAnchorX = it },
+            onToggleModernStyle = onToggleModernStyle,
             onQueryChange = onQueryChange,
             onGroupSelected = onGroupSelected,
             onOpenFavorites = onOpenFavorites,
             onOpenSourceManage = onOpenSourceManage
         )
-        LazyVerticalGrid(
-            columns = GridCells.Fixed(4),
-            contentPadding = PaddingValues(bottom = bottomInset + 12.dp),
-            modifier = Modifier.fillMaxSize()
-        ) {
-            item(key = "rule_subscription") {
-                RssTile(
-                    name = stringResource(R.string.rule_subscription),
-                    onClick = onOpenRuleSubscription,
-                    onLongClick = {}
-                ) {
-                    Image(
-                        painter = painterResource(R.drawable.image_legado),
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier
-                            .size(50.dp)
-                            .clip(RoundedCornerShape(12.dp))
+        if (modernStyle) {
+            RssModernView(
+                sources = sources,
+                state = modernState,
+                bottomInset = bottomInset,
+                categoriesExpanded = categoriesExpanded,
+                onCategoriesExpandedChange = { categoriesExpanded = it },
+                categoryAnchorX = categoryAnchorX,
+                sourcePickerVisible = sourcePickerVisible,
+                onDismissSourcePicker = { sourcePickerVisible = false },
+                onSelectSource = onModernSelectSource,
+                onSelectSort = onModernSelectSort,
+                onRefresh = onModernRefresh,
+                onLoadMore = onModernLoadMore,
+                onJumpToPage = onModernJumpToPage,
+                onSelectLayoutStyle = onModernSelectLayoutStyle,
+                onOpenArticle = onModernOpenArticle,
+                onOpenFullscreen = onOpenSource,
+                onSourceAction = onSourceAction,
+            )
+        } else {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(4),
+                contentPadding = PaddingValues(bottom = bottomInset + 12.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                item(key = "rule_subscription") {
+                    RssTile(
+                        name = stringResource(R.string.rule_subscription),
+                        onClick = onOpenRuleSubscription,
+                        onLongClick = {}
+                    ) {
+                        Image(
+                            painter = painterResource(R.drawable.image_legado),
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .size(50.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                        )
+                    }
+                }
+                items(sources, key = { it.sourceUrl }) { source ->
+                    RssSourceItem(
+                        source = source,
+                        reachability = RssSourceReachabilityStore.resolve(source, reachabilityMap),
+                        onClick = { onOpenSource(source) },
+                        onAction = { onSourceAction(source, it) }
                     )
                 }
-            }
-            items(sources, key = { it.sourceUrl }) { source ->
-                RssSourceItem(
-                    source = source,
-                    onClick = { onOpenSource(source) },
-                    onAction = { onSourceAction(source, it) }
-                )
             }
         }
     }
@@ -117,6 +172,7 @@ internal fun RssScreen(
 @Composable
 private fun RssSourceItem(
     source: RssSource,
+    reachability: RssSourceReachability,
     onClick: () -> Unit,
     onAction: (Int) -> Unit
 ) {
@@ -127,7 +183,25 @@ private fun RssSourceItem(
             onClick = onClick,
             onLongClick = { menuExpanded = true }
         ) {
-            RssSourceIcon(source)
+            Box(modifier = Modifier.size(50.dp)) {
+                RssSourceIcon(source)
+                if (reachability != RssSourceReachability.UNKNOWN) {
+                    val dotColor = if (reachability == RssSourceReachability.REACHABLE) {
+                        Color(0xFF22C55E)
+                    } else {
+                        Color(0xFFEF4444)
+                    }
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(3.dp)
+                            .size(9.dp)
+                            .clip(CircleShape)
+                            .background(dotColor)
+                            .border(1.2.dp, Color(NgTheme.colors.surface), CircleShape)
+                    )
+                }
+            }
         }
         RssSourceMenu(
             source = source,
@@ -206,7 +280,7 @@ private fun RssSourceIcon(source: RssSource) {
 }
 
 @Composable
-private fun RssSourceMenu(
+internal fun RssSourceMenu(
     source: RssSource,
     expanded: Boolean,
     onDismiss: () -> Unit,

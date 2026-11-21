@@ -64,6 +64,9 @@ import io.legado.app.help.book.removeType
 import io.legado.app.help.book.supportsReadAloud
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.LocalConfig
+import io.legado.app.help.translate.BookTitleTranslator
+import io.legado.app.help.translate.TranslateConfig
+import io.legado.app.help.translate.TranslateHistoryStore
 import io.legado.app.help.webView.PooledWebView
 import io.legado.app.help.webView.WebJsExtensions
 import io.legado.app.help.webView.WebJsExtensions.Companion.getInjectionString
@@ -90,6 +93,7 @@ import io.legado.app.ui.book.changesource.ChangeBookSourceDialog
 import io.legado.app.ui.book.changesource.ChangeBookSourceDrawer
 import io.legado.app.ui.book.info.edit.BookInfoEditActivity
 import io.legado.app.ui.book.manga.ReadMangaActivity
+import io.legado.app.ui.config.translate.TranslateConfigActivity
 import io.legado.app.ui.book.read.ReadBookActivity
 import io.legado.app.ui.book.read.ReadBookActivity.Companion.RESULT_DELETED
 import io.legado.app.ui.book.read.aloud.ReadAloudLauncher
@@ -343,6 +347,20 @@ class BookInfoActivity :
             BookInfoUiEvent.Back -> onBackPressedDispatcher.onBackPressed()
             BookInfoUiEvent.Refresh -> refreshBook()
             BookInfoUiEvent.CustomButton -> clickCustomButton()
+            BookInfoUiEvent.TranslateClick -> {
+                val current = viewModel.getBook(false) ?: return
+                val next = !TranslateConfig.isBookTranslateEnabled(current.bookUrl)
+                TranslateConfig.setBookTranslateEnabled(current.bookUrl, next)
+                uiState = uiState.copy(bookTranslateEnabled = next)
+                toastOnUi(if (next) "已开启自动翻译" else "已关闭自动翻译")
+                if (!next) {
+                    uiState = uiState.copy(displayBookName = null, originalNameText = null)
+                    showBookIntro(current)
+                } else {
+                    applyBookTitleTranslation(current)
+                    showBookIntro(current)
+                }
+            }
             is BookInfoUiEvent.Menu -> handleBookInfoMenuAction(event.action)
             BookInfoUiEvent.CoverClick -> changeCover()
             BookInfoUiEvent.CoverLongClick -> showCoverPreview()
@@ -353,6 +371,9 @@ class BookInfoActivity :
             is BookInfoUiEvent.TagClick -> clickTag(event.tag, false)
             is BookInfoUiEvent.TagLongClick -> clickTag(event.tag, true)
             BookInfoUiEvent.OriginClick -> editCurrentSource()
+            BookInfoUiEvent.OriginalNameClick -> viewModel.getBook(false)?.name?.let { name ->
+                sendToClip(name)
+            }
             BookInfoUiEvent.ChangeSource -> changeSource()
             BookInfoUiEvent.ChangeGroup -> changeGroup()
             BookInfoUiEvent.OpenToc -> openChapterListFromUi()
@@ -652,8 +673,17 @@ class BookInfoActivity :
             otherWorksGroupPrimaryBookUrls = emptyMap()
             expandedOtherWorksKeys.clear()
         }
+        val bookTranslateEnabled = TranslateConfig.isBookTranslateEnabled(book.bookUrl)
+        val cachedTranslatedName = if (bookTranslateEnabled) {
+            BookTitleTranslator.getCached(book.name)
+        } else {
+            null
+        }
         uiState = uiState.copy(
             book = book.copy(),
+            displayBookName = cachedTranslatedName,
+            originalNameText = cachedTranslatedName?.let { getString(R.string.book_original_name_show, book.name) },
+            bookTranslateEnabled = bookTranslateEnabled,
             tocText = if (bookChanged) getString(R.string.toc_s, getString(R.string.loading)) else uiState.tocText,
             originText = getString(R.string.origin_show, book.originName),
             latestText = getString(
@@ -686,6 +716,40 @@ class BookInfoActivity :
             otherWorks = if (bookChanged) emptyList() else uiState.otherWorks,
             deleteAlertEnabled = LocalConfig.bookInfoDeleteAlert,
         )
+        if (bookTranslateEnabled && cachedTranslatedName == null) {
+            applyBookTitleTranslation(book)
+        }
+    }
+
+    private fun applyBookTitleTranslation(book: Book) {
+        val cached = BookTitleTranslator.getCached(book.name)
+        if (!cached.isNullOrBlank()) {
+            uiState = uiState.copy(
+                displayBookName = cached,
+                originalNameText = getString(R.string.book_original_name_show, book.name),
+            )
+            return
+        }
+        if (!BookTitleTranslator.needsTranslation(book.name)) return
+        val targetBookUrl = book.bookUrl
+        val originBookName = book.name
+        lifecycleScope.launch {
+            val translated = BookTitleTranslator.translateText(originBookName)
+            if (!translated.isNullOrBlank() &&
+                viewModel.getBook(false)?.bookUrl == targetBookUrl &&
+                TranslateConfig.isBookTranslateEnabled(targetBookUrl)
+            ) {
+                TranslateHistoryStore.recordBookTitle(
+                    bookKey = targetBookUrl,
+                    originalTitle = originBookName,
+                    translatedTitle = translated,
+                )
+                uiState = uiState.copy(
+                    displayBookName = translated,
+                    originalNameText = getString(R.string.book_original_name_show, originBookName),
+                )
+            }
+        }
     }
 
     private fun updateInBookshelfState() {
@@ -1107,7 +1171,35 @@ class BookInfoActivity :
                 )
             }
         } else {
-            tvIntro.text = intro
+            val shouldTranslateIntro = TranslateConfig.isBookTranslateEnabled(book.bookUrl) &&
+                TranslateConfig.translateIntro
+            val cachedIntro = if (shouldTranslateIntro) {
+                BookTitleTranslator.getCached(intro)
+            } else {
+                null
+            }
+            tvIntro.text = cachedIntro ?: intro
+            if (shouldTranslateIntro &&
+                cachedIntro == null && BookTitleTranslator.needsTranslation(intro)
+            ) {
+                lifecycleScope.launch {
+                    val translated = BookTitleTranslator.translateText(intro)
+                    if (!translated.isNullOrBlank() &&
+                        webIntroLoadGeneration == textIntroGeneration &&
+                        uiState.introRenderMode == BookInfoIntroRenderMode.TEXT &&
+                        TranslateConfig.isBookTranslateEnabled(book.bookUrl)
+                    ) {
+                        TranslateHistoryStore.recordBookIntro(
+                            bookKey = book.bookUrl,
+                            originalTitle = book.name,
+                            translatedTitle = uiState.displayBookName,
+                            originalIntro = intro,
+                            translatedIntro = translated,
+                        )
+                        tvIntro.text = translated
+                    }
+                }
+            }
         }
     }
 
@@ -1644,6 +1736,9 @@ class BookInfoActivity :
 
     private fun readBook(book: Book) {
         if (!viewModel.inBookshelf) {
+            if ((book.isVideo || book.isAudio) && viewModel.currentChapterList(book) == null) {
+                toastOnUi("正在加载剧集目录...")
+            }
             book.addType(BookType.notShelf)
             viewModel.saveBook(book) {
                 viewModel.saveChapterList {

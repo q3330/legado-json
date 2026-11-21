@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import io.legado.app.R
+import io.legado.app.constant.BookSourceType
 import io.legado.app.ui.design.components.NgDialogVariant
 import io.legado.app.ui.design.components.NgStatusTagStyle
 import io.legado.app.ui.design.components.NgStatusTagVariant
@@ -80,6 +81,7 @@ import kotlinx.coroutines.delay
 internal fun BookSourceDebugScreen(
     query: String,
     helpVisible: Boolean,
+    sourceType: Int = BookSourceType.default,
     searchExample: String,
     exploreExample: String,
     exploreOptions: List<Pair<String, String>>,
@@ -123,6 +125,7 @@ internal fun BookSourceDebugScreen(
         )
         if (helpVisible) {
             BookSourceDebugHelp(
+                sourceType = sourceType,
                 searchExample = searchExample,
                 exploreExample = exploreExample,
                 onSearch = submit,
@@ -298,6 +301,7 @@ private fun bookSourceDebugMenuItems(): List<NgExpandableActionMenuItem> {
 
 @Composable
 private fun BookSourceDebugHelp(
+    sourceType: Int,
     searchExample: String,
     exploreExample: String,
     onSearch: (String) -> Unit,
@@ -307,6 +311,20 @@ private fun BookSourceDebugHelp(
     onTocClick: () -> Unit,
     onContentClick: () -> Unit,
 ) {
+    val typeLabel = when (sourceType) {
+        BookSourceType.image -> "图片类"
+        BookSourceType.audio -> "音频类"
+        BookSourceType.video -> "视频类"
+        BookSourceType.file -> "文件类"
+        else -> "文本类"
+    }
+    val typeHint = when (sourceType) {
+        BookSourceType.image -> "正文阶段将自动提取 <img> 图片列表并抽样探活图床"
+        BookSourceType.audio -> "正文阶段将自动提取音频流 URL 并探活可达性"
+        BookSourceType.video -> "正文阶段将自动提取视频播放链接并探活可达性"
+        BookSourceType.file -> "详情阶段将跳过目录并提取/探活文件下载链接"
+        else -> "正文阶段将统计可见有效字数并提示短文本/验证页"
+    }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -314,6 +332,24 @@ private fun BookSourceDebugHelp(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            NgStatusTag(
+                text = typeLabel,
+                variant = NgStatusTagVariant.PRIMARY,
+                style = NgStatusTagStyle.REGULAR,
+            )
+            Text(
+                text = typeHint,
+                color = Color(NgTheme.colors.onSurfaceVariant),
+                fontSize = 12.sp,
+                lineHeight = 16.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
         DebugHelpSection(title = "调试搜索>>输入关键字，如：") {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 NgActionChip(text = searchExample, onClick = { onSearch(searchExample) })
@@ -334,19 +370,27 @@ private fun BookSourceDebugHelp(
                 modifier = Modifier.fillMaxWidth(),
             )
         }
-        DebugHelpSection(title = "调试目录页>>输入目录页URL，如：") {
-            NgActionChip(
-                text = "++https://www.zhaishuyuan.com/read/30394",
-                onClick = onTocClick,
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
-        DebugHelpSection(title = "调试正文页>>输入正文页URL，如：") {
-            NgActionChip(
-                text = "--https://www.zhaishuyuan.com/chapter/30394/20940996",
-                onClick = onContentClick,
-                modifier = Modifier.fillMaxWidth(),
-            )
+        if (sourceType != BookSourceType.file) {
+            DebugHelpSection(title = "调试目录页>>输入目录页URL，如：") {
+                NgActionChip(
+                    text = "++https://www.zhaishuyuan.com/read/30394",
+                    onClick = onTocClick,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            val contentHintTitle = when (sourceType) {
+                BookSourceType.image -> "调试图片正文页>>输入章节URL，如："
+                BookSourceType.audio -> "调试音频正文页>>输入章节URL，如："
+                BookSourceType.video -> "调试视频播放页>>输入剧集URL，如："
+                else -> "调试正文页>>输入正文页URL，如："
+            }
+            DebugHelpSection(title = contentHintTitle) {
+                NgActionChip(
+                    text = "--https://www.zhaishuyuan.com/chapter/30394/20940996",
+                    onClick = onContentClick,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
         }
     }
 }
@@ -400,7 +444,7 @@ private fun BookSourceDebugTimeline(
 }
 
 @Composable
-private fun BookSourceDebugPhaseRow(
+internal fun BookSourceDebugPhaseRow(
     item: BookSourceDebugTimelineState.DebugItem.Phase,
     onClick: () -> Unit,
 ) {

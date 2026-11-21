@@ -9,6 +9,7 @@ import io.legado.app.base.BaseViewModel
 import io.legado.app.constant.AppLog
 import io.legado.app.data.appDb
 import io.legado.app.data.entities.RssSource
+import io.legado.app.help.source.RssSourceReachabilityStore
 import io.legado.app.model.rss.Rss
 import io.legado.app.utils.stackTraceStr
 import kotlinx.coroutines.Dispatchers.IO
@@ -26,10 +27,19 @@ class RssArticlesViewModel(application: Application) : BaseViewModel(application
         scope = viewModelScope,
         fetch = { request ->
             withContext(IO) {
-                Rss.getArticlesAwait(
-                    request.query.sortName, request.url, request.query.source,
-                    request.page, request.query.searchKey
-                )
+                try {
+                    val result = Rss.getArticlesAwait(
+                        request.query.sortName, request.url, request.query.source,
+                        request.page, request.query.searchKey
+                    )
+                    RssSourceReachabilityStore.markReachable(request.query.source.sourceUrl)
+                    result
+                } catch (e: Throwable) {
+                    if (e !is kotlinx.coroutines.CancellationException) {
+                        RssSourceReachabilityStore.markUnreachable(request.query.source.sourceUrl)
+                    }
+                    throw e
+                }
             }
         },
         store = { request, articles ->
@@ -76,6 +86,8 @@ class RssArticlesViewModel(application: Application) : BaseViewModel(application
     }
 
     fun loadArticles(rssSource: RssSource) = paging.refresh(query(rssSource))
+
+    fun jumpToPage(rssSource: RssSource, page: Int) = paging.jumpToPage(query(rssSource), page)
 
     fun loadMore(rssSource: RssSource) = paging.loadMore(query(rssSource))
 

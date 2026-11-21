@@ -4,6 +4,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -15,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -31,7 +35,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -41,21 +48,30 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlin.math.roundToInt
 import androidx.compose.ui.window.PopupProperties
 import io.legado.app.R
 import io.legado.app.constant.AppPattern
 import io.legado.app.constant.BookSourceType
 import io.legado.app.data.entities.BookSourcePart
+import io.legado.app.help.source.BookSourceDedupe
+import io.legado.app.help.source.BookSourceDedupeMode
+import io.legado.app.help.source.BookSourceDedupeNode
+import io.legado.app.help.source.BookSourceReachability
+import io.legado.app.help.source.BookSourceReachabilityStore
 import io.legado.app.model.CheckSourceTaskState
 import io.legado.app.model.CheckSourceTaskStatus
 import io.legado.app.ui.design.components.compose.NgExpandableActionMenu
@@ -63,6 +79,7 @@ import io.legado.app.ui.design.components.compose.NgExpandableActionMenuItem
 import io.legado.app.ui.design.components.compose.NgExpandableActionMenuVariant
 import io.legado.app.ui.design.components.compose.NgFileSelectionCheckbox
 import io.legado.app.ui.design.components.compose.NgFileSelectionCheckboxVariant
+import io.legado.app.ui.design.components.compose.NgFileSelectionTriStateCheckbox
 import io.legado.app.ui.design.components.compose.NgFloatingToolbarBackButton
 import io.legado.app.ui.design.components.compose.NgGlassDefaults
 import io.legado.app.ui.design.components.compose.NgGlassSurface
@@ -88,6 +105,10 @@ private const val FILTER_TYPE_FILE_ITEM_ID = 0x56000085
 private const val FILTER_STATUS_PARENT_ITEM_ID = 0x56000100
 private const val FILTER_ALL_ITEM_ID = 0x56000101
 private const val FILTER_GROUP_PARENT_ITEM_ID = 0x56000200
+private const val DEDUPE_PARENT_ITEM_ID = 0x56000300
+private const val DEDUPE_NONE_ITEM_ID = 0x56000301
+private const val DEDUPE_URL_ITEM_ID = 0x56000302
+private const val DEDUPE_NAME_ITEM_ID = 0x56000303
 private const val GROUP_ITEM_ID_BASE = 0x56001000
 private const val SORT_DIRECTION_ITEM_ID = 0x56003000
 private const val GROUP_QUERY_PREFIX = "group:"
@@ -105,10 +126,12 @@ internal sealed interface BookSourceManageAction {
     data object ManageGroups : BookSourceManageAction
     data object ToggleSortDirection : BookSourceManageAction
     data object SelectAll : BookSourceManageAction
+    data object ClearSelection : BookSourceManageAction
     data object InvertSelection : BookSourceManageAction
     data object EnableSelection : BookSourceManageAction
     data object DisableSelection : BookSourceManageAction
     data object ConfigureSelectionCapabilities : BookSourceManageAction
+    data object ConfigureSelectionType : BookSourceManageAction
     data object AddSelectionToGroup : BookSourceManageAction
     data object ClearSelectionGroups : BookSourceManageAction
     data object AutoGroupSelection : BookSourceManageAction
@@ -123,6 +146,10 @@ internal sealed interface BookSourceManageAction {
     data class QueryChanged(val query: String) : BookSourceManageAction
     data class ViewModeChanged(val mode: BookSourceViewMode) : BookSourceManageAction
     data class SortChanged(val sort: BookSourceSort) : BookSourceManageAction
+    data class DedupeModeChanged(val mode: BookSourceDedupeMode) : BookSourceManageAction
+    data class ToggleDedupeNode(val groupKey: String) : BookSourceManageAction
+    data class SetDedupePrimary(val groupKey: String, val source: BookSourcePart) : BookSourceManageAction
+    data object ToggleAllDedupe : BookSourceManageAction
     data class SelectionChanged(val source: BookSourcePart, val selected: Boolean) : BookSourceManageAction
     data class SectionSelectionChanged(val sources: List<BookSourcePart>, val selected: Boolean) : BookSourceManageAction
     data class ConfigureCapabilities(val source: BookSourcePart) : BookSourceManageAction
@@ -131,6 +158,7 @@ internal sealed interface BookSourceManageAction {
     data class Search(val source: BookSourcePart) : BookSourceManageAction
     data class Debug(val source: BookSourcePart) : BookSourceManageAction
     data class Delete(val source: BookSourcePart) : BookSourceManageAction
+    data class SwipeDelete(val source: BookSourcePart) : BookSourceManageAction
     data class Top(val source: BookSourcePart) : BookSourceManageAction
     data class Bottom(val source: BookSourcePart) : BookSourceManageAction
     data class Reorder(val sources: List<BookSourcePart>) : BookSourceManageAction
@@ -152,6 +180,10 @@ internal fun BookSourceManageScreen(
     sort: BookSourceSort,
     sortAscending: Boolean,
     expandedSections: Set<String>,
+    dedupeMode: BookSourceDedupeMode,
+    ruleScores: Map<String, Int>,
+    preferredPrimaries: Map<String, String>,
+    expandedDedupeKeys: Set<String>,
     checkTaskState: CheckSourceTaskState,
     onAction: (BookSourceManageAction) -> Unit,
 ) {
@@ -194,10 +226,15 @@ internal fun BookSourceManageScreen(
             sort = sort,
             sortAscending = sortAscending,
             viewMode = viewMode,
+            dedupeMode = dedupeMode,
             onQueryChange = { onAction(BookSourceManageAction.QueryChanged(it)) },
             onBack = { onAction(BookSourceManageAction.Back) },
             onAction = onAction,
         )
+        val dedupeTree = remember(sources, dedupeMode, ruleScores, preferredPrimaries) {
+            if (dedupeMode == BookSourceDedupeMode.NONE) emptyList()
+            else BookSourceDedupe.buildTree(sources, dedupeMode, ruleScores, preferredPrimaries)
+        }
         BookSourceManagePanel(
             sources = sources,
             query = query,
@@ -205,6 +242,11 @@ internal fun BookSourceManageScreen(
             viewMode = viewMode,
             sort = sort,
             expandedSections = expandedSections,
+            dedupeMode = dedupeMode,
+            dedupeTree = dedupeTree,
+            ruleScores = ruleScores,
+            preferredPrimaries = preferredPrimaries,
+            expandedDedupeKeys = expandedDedupeKeys,
             onAction = onAction,
             modifier = Modifier.weight(1f),
         )
@@ -215,10 +257,50 @@ internal fun BookSourceManageScreen(
                 onDismiss = { onAction(BookSourceManageAction.DismissCheckTask) },
             )
         }
-        val totalCount = remember(sources) { sources.distinctBy(BookSourcePart::bookSourceUrl).size }
+        val expandableDedupeKeys = remember(dedupeTree) {
+            dedupeTree.filter { it.hasDuplicates }.mapTo(hashSetOf()) { it.groupKey }
+        }
+        val allDedupeExpanded = expandableDedupeKeys.isNotEmpty() &&
+            expandableDedupeKeys.all { it in expandedDedupeKeys }
+        val selectableVisibleSources = remember(sources, dedupeMode, dedupeTree, expandedDedupeKeys) {
+            if (dedupeMode == BookSourceDedupeMode.NONE) {
+                sources.distinctBy(BookSourcePart::bookSourceUrl)
+            } else {
+                buildList(sources.size) {
+                    dedupeTree.forEach { node ->
+                        if (node.hasDuplicates && node.groupKey in expandedDedupeKeys) {
+                            addAll(node.allSources)
+                        } else {
+                            add(node.primary)
+                        }
+                    }
+                }
+            }
+        }
+        val totalCount = selectableVisibleSources.size
+        val selectAllState = remember(selectableVisibleSources, selectedUrls) {
+            selectionStateOf(selectableVisibleSources, selectedUrls)
+        }
+        val selectedSingleType = remember(sources, selectedUrls) {
+            if (selectedUrls.isEmpty()) return@remember null
+            var singleType: Int? = null
+            for (source in sources) {
+                if (source.bookSourceUrl !in selectedUrls) continue
+                if (singleType == null) {
+                    singleType = source.bookSourceType
+                } else if (singleType != source.bookSourceType) {
+                    return@remember null
+                }
+            }
+            singleType
+        }
         BookSourceManageBottomDock(
             selectedCount = selectedUrls.size,
             totalCount = totalCount,
+            selectAllState = selectAllState,
+            selectedSingleType = selectedSingleType,
+            showDedupeExpandAll = dedupeMode != BookSourceDedupeMode.NONE,
+            allDedupeExpanded = allDedupeExpanded,
             modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 8.dp),
             onAction = onAction,
         )
@@ -340,6 +422,7 @@ private fun BookSourceManageTopBar(
     sort: BookSourceSort,
     sortAscending: Boolean,
     viewMode: BookSourceViewMode,
+    dedupeMode: BookSourceDedupeMode,
     onQueryChange: (String) -> Unit,
     onBack: () -> Unit,
     onAction: (BookSourceManageAction) -> Unit,
@@ -473,7 +556,29 @@ private fun BookSourceManageTopBar(
             NgExpandableActionMenuItem(R.id.menu_sort_enable, R.string.is_enabled, R.drawable.ic_check_circle_outline, checked = sort == BookSourceSort.Enable),
         )
     }
-    val mainMenuItems = remember(sortItems) {
+    val dedupeItems = remember(dedupeMode) {
+        listOf(
+            NgExpandableActionMenuItem(
+                DEDUPE_NONE_ITEM_ID,
+                R.string.book_source_dedupe_none,
+                R.drawable.ic_clear,
+                checked = dedupeMode == BookSourceDedupeMode.NONE,
+            ),
+            NgExpandableActionMenuItem(
+                DEDUPE_URL_ITEM_ID,
+                R.string.book_source_dedupe_url,
+                R.drawable.ic_web_outline,
+                checked = dedupeMode == BookSourceDedupeMode.BY_URL,
+            ),
+            NgExpandableActionMenuItem(
+                DEDUPE_NAME_ITEM_ID,
+                R.string.book_source_dedupe_name,
+                R.drawable.ic_sort,
+                checked = dedupeMode == BookSourceDedupeMode.BY_NAME,
+            ),
+        )
+    }
+    val mainMenuItems = remember(sortItems, dedupeItems) {
         listOf(
             NgExpandableActionMenuItem(
                 R.id.menu_add_book_source,
@@ -506,6 +611,12 @@ private fun BookSourceManageTopBar(
                 R.string.group_manage,
                 R.drawable.ic_settings,
                 dividerBefore = true,
+            ),
+            NgExpandableActionMenuItem(
+                DEDUPE_PARENT_ITEM_ID,
+                R.string.book_source_dedupe_manage,
+                R.drawable.ic_groups,
+                children = dedupeItems,
             ),
             NgExpandableActionMenuItem(
                 R.id.action_sort,
@@ -606,9 +717,14 @@ private fun BookSourceManageTopBar(
             BookSourceTopBarPopupButton(
                 iconRes = R.drawable.ic_grid_menu,
                 contentDescription = stringResource(R.string.menu),
-                tint = actionColor,
+                tint = if (dedupeMode != BookSourceDedupeMode.NONE) activeActionColor else actionColor,
                 state = mainMenuState,
                 items = mainMenuItems,
+                defaultExpandedItemIds = if (dedupeMode != BookSourceDedupeMode.NONE) {
+                    setOf(DEDUPE_PARENT_ITEM_ID)
+                } else {
+                    emptySet()
+                },
                 onItemClick = { item ->
                     when (item.itemId) {
                         R.id.menu_add_book_source -> onAction(BookSourceManageAction.AddDeclarative)
@@ -625,6 +741,9 @@ private fun BookSourceManageTopBar(
                         R.id.menu_sort_respondTime -> onAction(BookSourceManageAction.SortChanged(BookSourceSort.Respond))
                         R.id.menu_sort_enable -> onAction(BookSourceManageAction.SortChanged(BookSourceSort.Enable))
                         R.id.menu_group_manage -> onAction(BookSourceManageAction.ManageGroups)
+                        DEDUPE_NONE_ITEM_ID -> onAction(BookSourceManageAction.DedupeModeChanged(BookSourceDedupeMode.NONE))
+                        DEDUPE_URL_ITEM_ID -> onAction(BookSourceManageAction.DedupeModeChanged(BookSourceDedupeMode.BY_URL))
+                        DEDUPE_NAME_ITEM_ID -> onAction(BookSourceManageAction.DedupeModeChanged(BookSourceDedupeMode.BY_NAME))
                     }
                 },
             )
@@ -741,6 +860,11 @@ private fun BookSourceManagePanel(
     viewMode: BookSourceViewMode,
     sort: BookSourceSort,
     expandedSections: Set<String>,
+    dedupeMode: BookSourceDedupeMode,
+    dedupeTree: List<BookSourceDedupeNode>,
+    ruleScores: Map<String, Int>,
+    preferredPrimaries: Map<String, String>,
+    expandedDedupeKeys: Set<String>,
     onAction: (BookSourceManageAction) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -767,6 +891,10 @@ private fun BookSourceManagePanel(
                 sources = sources,
                 selectedUrls = selectedUrls,
                 expandedSections = expandedSections,
+                dedupeMode = dedupeMode,
+                ruleScores = ruleScores,
+                preferredPrimaries = preferredPrimaries,
+                expandedDedupeKeys = expandedDedupeKeys,
                 onAction = onAction,
             )
             else -> NgGlassSurface(
@@ -776,13 +904,22 @@ private fun BookSourceManagePanel(
                 style = panelStyle,
                 liquidCornerRadius = NgTheme.shapes.mediumDp.dp,
             ) {
-                BookSourceFlatList(
-                    sources = sources,
-                    selectedUrls = selectedUrls,
-                    canReorder = query.isBlank() && viewMode == BookSourceViewMode.LIST &&
-                        sort == BookSourceSort.Default,
-                    onAction = onAction,
-                )
+                if (dedupeMode == BookSourceDedupeMode.NONE) {
+                    BookSourceFlatList(
+                        sources = sources,
+                        selectedUrls = selectedUrls,
+                        canReorder = query.isBlank() && viewMode == BookSourceViewMode.LIST &&
+                            sort == BookSourceSort.Default,
+                        onAction = onAction,
+                    )
+                } else {
+                    BookSourceDedupeTreeList(
+                        nodes = dedupeTree,
+                        selectedUrls = selectedUrls,
+                        expandedDedupeKeys = expandedDedupeKeys,
+                        onAction = onAction,
+                    )
+                }
             }
         }
     }
@@ -878,6 +1015,183 @@ private fun BookSourceFlatList(
     }
 }
 
+private fun selectionStateOf(
+    sources: List<BookSourcePart>,
+    selectedUrls: Set<String>,
+): ToggleableState {
+    if (sources.isEmpty()) return ToggleableState.Off
+    var selectedCount = 0
+    for (source in sources) {
+        if (source.bookSourceUrl in selectedUrls) selectedCount++
+    }
+    return when {
+        selectedCount == 0 -> ToggleableState.Off
+        selectedCount == sources.size -> ToggleableState.On
+        else -> ToggleableState.Indeterminate
+    }
+}
+
+private sealed interface BookSourceTreeRowItem {
+    val key: String
+    val source: BookSourcePart
+
+    data class Primary(
+        val node: BookSourceDedupeNode,
+        val expanded: Boolean,
+    ) : BookSourceTreeRowItem {
+        override val key: String get() = "primary:${node.groupKey}"
+        override val source: BookSourcePart get() = node.primary
+    }
+
+    data class Duplicate(
+        val parentGroupKey: String,
+        override val source: BookSourcePart,
+        val isPrimary: Boolean,
+    ) : BookSourceTreeRowItem {
+        override val key: String get() = "dup:${parentGroupKey}:${source.bookSourceUrl}"
+    }
+}
+
+@Composable
+private fun BookSourceDedupeTreeList(
+    nodes: List<BookSourceDedupeNode>,
+    selectedUrls: Set<String>,
+    expandedDedupeKeys: Set<String>,
+    onAction: (BookSourceManageAction) -> Unit,
+) {
+    val visibleItems = remember(nodes, expandedDedupeKeys) {
+        buildList(nodes.size) {
+            nodes.forEach { node ->
+                val expanded = node.hasDuplicates && node.groupKey in expandedDedupeKeys
+                add(BookSourceTreeRowItem.Primary(node = node, expanded = expanded))
+                if (expanded) {
+                    val primaryUrl = node.primary.bookSourceUrl
+                    node.allSources.forEach { child ->
+                        add(
+                            BookSourceTreeRowItem.Duplicate(
+                                parentGroupKey = node.groupKey,
+                                source = child,
+                                isPrimary = child.bookSourceUrl == primaryUrl,
+                            )
+                        )
+                    }
+                }
+            }
+        }
+    }
+    val listState = rememberLazyListState()
+    val slideSelectState = rememberNgLazySlideSelectState(
+        listState = listState,
+        isSelected = { index ->
+            when (val item = visibleItems.getOrNull(index)) {
+                is BookSourceTreeRowItem.Primary -> {
+                    if (item.expanded) {
+                        selectionStateOf(item.node.allSources, selectedUrls) == ToggleableState.On
+                    } else {
+                        item.node.primary.bookSourceUrl in selectedUrls
+                    }
+                }
+                is BookSourceTreeRowItem.Duplicate -> item.source.bookSourceUrl in selectedUrls
+                null -> false
+            }
+        },
+        onSelectionChange = { index, selected ->
+            when (val item = visibleItems.getOrNull(index)) {
+                is BookSourceTreeRowItem.Primary -> {
+                    if (item.expanded) {
+                        onAction(BookSourceManageAction.SectionSelectionChanged(item.node.allSources, selected))
+                    } else {
+                        onAction(BookSourceManageAction.SelectionChanged(item.node.primary, selected))
+                    }
+                }
+                is BookSourceTreeRowItem.Duplicate -> {
+                    onAction(BookSourceManageAction.SelectionChanged(item.source, selected))
+                }
+                null -> Unit
+            }
+        },
+    )
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .ngSlideSelect(
+                state = slideSelectState,
+                enabled = visibleItems.isNotEmpty(),
+                slideAreaStart = 28.dp,
+                slideAreaEnd = 60.dp,
+            ),
+        state = listState,
+    ) {
+        itemsIndexed(
+            items = visibleItems,
+            key = { _, item -> item.key },
+        ) { index, item ->
+            when (item) {
+                is BookSourceTreeRowItem.Primary -> {
+                    val branchSelectionState = if (item.expanded) {
+                        selectionStateOf(item.node.allSources, selectedUrls)
+                    } else {
+                        null
+                    }
+                    BookSourceManageRow(
+                        source = item.node.primary,
+                        selected = item.node.primary.bookSourceUrl in selectedUrls,
+                        showDivider = index < visibleItems.lastIndex,
+                        manualSort = false,
+                        onAction = onAction,
+                        modifier = Modifier,
+                        bodyDragModifier = null,
+                        showDedupeToggle = true,
+                        hasDedupeChildren = item.node.hasDuplicates,
+                        dedupeExpanded = item.expanded,
+                        dedupeDuplicateCount = if (item.node.hasDuplicates) item.node.allSources.size else 0,
+                        selectionState = branchSelectionState,
+                        onTriStateSelectionToggle = if (branchSelectionState != null) {
+                            {
+                                val selectAll = branchSelectionState != ToggleableState.On
+                                onAction(
+                                    BookSourceManageAction.SectionSelectionChanged(
+                                        item.node.allSources,
+                                        selectAll,
+                                    )
+                                )
+                            }
+                        } else {
+                            null
+                        },
+                        onToggleDedupe = {
+                            onAction(BookSourceManageAction.ToggleDedupeNode(item.node.groupKey))
+                        },
+                    )
+                }
+                is BookSourceTreeRowItem.Duplicate -> {
+                    BookSourceManageRow(
+                        source = item.source,
+                        selected = item.source.bookSourceUrl in selectedUrls,
+                        showDivider = index < visibleItems.lastIndex,
+                        manualSort = false,
+                        onAction = onAction,
+                        modifier = Modifier.background(
+                            Color(NgTheme.colors.surfaceContainerLow).copy(alpha = 0.55f)
+                        ),
+                        bodyDragModifier = null,
+                        isDedupeChild = true,
+                        isDedupeChildPrimary = item.isPrimary,
+                        onPromoteDedupePrimary = {
+                            onAction(
+                                BookSourceManageAction.SetDedupePrimary(
+                                    groupKey = item.parentGroupKey,
+                                    source = item.source,
+                                )
+                            )
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
 private data class BookSourceSectionUi(
     val key: String,
     val title: String,
@@ -891,6 +1205,10 @@ private fun BookSourceGroupedList(
     sources: List<BookSourcePart>,
     selectedUrls: Set<String>,
     expandedSections: Set<String>,
+    dedupeMode: BookSourceDedupeMode,
+    ruleScores: Map<String, Int>,
+    preferredPrimaries: Map<String, String>,
+    expandedDedupeKeys: Set<String>,
     onAction: (BookSourceManageAction) -> Unit,
 ) {
     val noGroup = stringResource(R.string.no_group)
@@ -932,26 +1250,119 @@ private fun BookSourceGroupedList(
                 BookSourceSectionHeader(
                     section = section,
                     expanded = section.key in expandedSections,
-                    selected = section.sources.isNotEmpty() &&
-                        section.sources.all { it.bookSourceUrl in selectedUrls },
+                    selectionState = selectionStateOf(section.sources, selectedUrls),
                     onAction = onAction,
                 )
             }
             if (section.key in expandedSections) {
-                items(
-                    items = section.sources,
-                    key = { source -> "${section.key}:${source.bookSourceUrl}" },
-                ) { source ->
-                    BookSourceManageRow(
-                        source = source,
-                        selected = source.bookSourceUrl in selectedUrls,
-                        showDivider = true,
-                        manualSort = false,
-                        onAction = onAction,
-                        modifier = Modifier
-                            .background(colorResource(R.color.ng_surface_card)),
-                        bodyDragModifier = null,
+                if (dedupeMode == BookSourceDedupeMode.NONE) {
+                    items(
+                        items = section.sources,
+                        key = { source -> "${section.key}:${source.bookSourceUrl}" },
+                    ) { source ->
+                        BookSourceManageRow(
+                            source = source,
+                            selected = source.bookSourceUrl in selectedUrls,
+                            showDivider = true,
+                            manualSort = false,
+                            onAction = onAction,
+                            modifier = Modifier
+                                .background(colorResource(R.color.ng_surface_card)),
+                            bodyDragModifier = null,
+                        )
+                    }
+                } else {
+                    val sectionTree = BookSourceDedupe.buildTree(
+                        section.sources,
+                        dedupeMode,
+                        ruleScores,
+                        preferredPrimaries,
                     )
+                    val sectionRows = buildList(section.sources.size) {
+                        sectionTree.forEach { node ->
+                            val expanded = node.hasDuplicates && node.groupKey in expandedDedupeKeys
+                            add(BookSourceTreeRowItem.Primary(node = node, expanded = expanded))
+                            if (expanded) {
+                                val primaryUrl = node.primary.bookSourceUrl
+                                node.allSources.forEach { child ->
+                                    add(
+                                        BookSourceTreeRowItem.Duplicate(
+                                            parentGroupKey = node.groupKey,
+                                            source = child,
+                                            isPrimary = child.bookSourceUrl == primaryUrl,
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    items(
+                        items = sectionRows,
+                        key = { item -> "${section.key}:${item.key}" },
+                    ) { item ->
+                        when (item) {
+                            is BookSourceTreeRowItem.Primary -> {
+                                val branchSelectionState = if (item.expanded) {
+                                    selectionStateOf(item.node.allSources, selectedUrls)
+                                } else {
+                                    null
+                                }
+                                BookSourceManageRow(
+                                    source = item.node.primary,
+                                    selected = item.node.primary.bookSourceUrl in selectedUrls,
+                                    showDivider = true,
+                                    manualSort = false,
+                                    onAction = onAction,
+                                    modifier = Modifier
+                                        .background(colorResource(R.color.ng_surface_card)),
+                                    bodyDragModifier = null,
+                                    showDedupeToggle = true,
+                                    hasDedupeChildren = item.node.hasDuplicates,
+                                    dedupeExpanded = item.expanded,
+                                    dedupeDuplicateCount = if (item.node.hasDuplicates) item.node.allSources.size else 0,
+                                    selectionState = branchSelectionState,
+                                    onTriStateSelectionToggle = if (branchSelectionState != null) {
+                                        {
+                                            val selectAll = branchSelectionState != ToggleableState.On
+                                            onAction(
+                                                BookSourceManageAction.SectionSelectionChanged(
+                                                    item.node.allSources,
+                                                    selectAll,
+                                                )
+                                            )
+                                        }
+                                    } else {
+                                        null
+                                    },
+                                    onToggleDedupe = {
+                                        onAction(BookSourceManageAction.ToggleDedupeNode(item.node.groupKey))
+                                    },
+                                )
+                            }
+                            is BookSourceTreeRowItem.Duplicate -> {
+                                BookSourceManageRow(
+                                    source = item.source,
+                                    selected = item.source.bookSourceUrl in selectedUrls,
+                                    showDivider = true,
+                                    manualSort = false,
+                                    onAction = onAction,
+                                    modifier = Modifier
+                                        .background(Color(NgTheme.colors.surfaceContainerLow)),
+                                    bodyDragModifier = null,
+                                    isDedupeChild = true,
+                                    isDedupeChildPrimary = item.isPrimary,
+                                    onPromoteDedupePrimary = {
+                                        onAction(
+                                            BookSourceManageAction.SetDedupePrimary(
+                                                groupKey = item.parentGroupKey,
+                                                source = item.source,
+                                            )
+                                        )
+                                    },
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -963,7 +1374,7 @@ private fun BookSourceGroupedList(
 private fun BookSourceSectionHeader(
     section: BookSourceSectionUi,
     expanded: Boolean,
-    selected: Boolean,
+    selectionState: ToggleableState,
     onAction: (BookSourceManageAction) -> Unit,
 ) {
     val cardShape = RoundedCornerShape(10.dp)
@@ -1003,10 +1414,11 @@ private fun BookSourceSectionHeader(
                     ),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                NgFileSelectionCheckbox(
-                    checked = selected,
-                    onCheckedChange = {
-                        onAction(BookSourceManageAction.SectionSelectionChanged(section.sources, it))
+                NgFileSelectionTriStateCheckbox(
+                    state = selectionState,
+                    onClick = {
+                        val selectAll = selectionState != ToggleableState.On
+                        onAction(BookSourceManageAction.SectionSelectionChanged(section.sources, selectAll))
                     },
                     variant = NgFileSelectionCheckboxVariant.COMPACT,
                 )
@@ -1079,151 +1491,304 @@ private fun BookSourceManageRow(
     onAction: (BookSourceManageAction) -> Unit,
     modifier: Modifier,
     bodyDragModifier: Modifier?,
+    showDedupeToggle: Boolean = false,
+    hasDedupeChildren: Boolean = false,
+    dedupeExpanded: Boolean = false,
+    dedupeDuplicateCount: Int = 0,
+    isDedupeChild: Boolean = false,
+    isDedupeChildPrimary: Boolean = false,
+    selectionState: ToggleableState? = null,
+    onTriStateSelectionToggle: (() -> Unit)? = null,
+    onToggleDedupe: (() -> Unit)? = null,
+    onPromoteDedupePrimary: (() -> Unit)? = null,
 ) {
     val menuState = remember(source.bookSourceUrl) { NgPopupToggleState() }
     val titleColor = Color(NgTheme.colors.onSurface).copy(
         alpha = if (source.enabled) 1f else 0.52f,
     )
+    var rowWidthPx by remember { mutableIntStateOf(0) }
+    var swipeOffsetPx by remember(source.bookSourceUrl) { mutableFloatStateOf(0f) }
+    val swipeDeleteThreshold = rowWidthPx / 3f
+    val reachedDeleteThreshold = rowWidthPx > 0 && -swipeOffsetPx >= swipeDeleteThreshold
+    val dragState = rememberDraggableState { delta ->
+        val maxSwipe = if (rowWidthPx > 0) rowWidthPx * 0.45f else 360f
+        swipeOffsetPx = (swipeOffsetPx + delta).coerceIn(-maxSwipe, 0f)
+    }
     Column(modifier = modifier.fillMaxWidth()) {
-        Row(
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(52.dp)
-                .clickable {
-                    onAction(BookSourceManageAction.SelectionChanged(source, !selected))
-                },
-            verticalAlignment = Alignment.CenterVertically,
+                .onSizeChanged { rowWidthPx = it.width }
+                .draggable(
+                    state = dragState,
+                    orientation = Orientation.Horizontal,
+                    onDragStopped = {
+                        if (rowWidthPx > 0 && -swipeOffsetPx >= rowWidthPx / 3f) {
+                            swipeOffsetPx = 0f
+                            onAction(BookSourceManageAction.SwipeDelete(source))
+                        } else {
+                            swipeOffsetPx = 0f
+                        }
+                    },
+                ),
         ) {
-            NgFileSelectionCheckbox(
-                checked = selected,
-                onCheckedChange = {
-                    onAction(BookSourceManageAction.SelectionChanged(source, it))
-                },
-                variant = NgFileSelectionCheckboxVariant.COMPACT,
-            )
+            if (swipeOffsetPx < -1f) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            colorResource(R.color.ng_error).copy(
+                                alpha = if (reachedDeleteThreshold) 1f else 0.78f
+                            )
+                        )
+                        .padding(end = 18.dp),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_book_info_delete),
+                        contentDescription = stringResource(R.string.delete),
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        text = stringResource(R.string.delete),
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+            }
             Row(
                 modifier = Modifier
-                    .weight(1f)
-                    .fillMaxHeight()
-                    .then(bodyDragModifier ?: Modifier),
+                    .offset { IntOffset(swipeOffsetPx.roundToInt(), 0) }
+                    .fillMaxSize()
+                    .background(
+                        if (swipeOffsetPx < -1f) {
+                            colorResource(R.color.ng_surface_card)
+                        } else {
+                            Color.Transparent
+                        }
+                    ),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Box(
+                if (isDedupeChild) {
+                    Box(
+                        modifier = Modifier
+                            .padding(start = 6.dp)
+                            .size(24.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(22.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable(enabled = onPromoteDedupePrimary != null && !isDedupeChildPrimary) {
+                                    onPromoteDedupePrimary?.invoke()
+                                },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                painter = painterResource(
+                                    if (isDedupeChildPrimary) R.drawable.ic_star_filled_20
+                                    else R.drawable.ic_star_outline_20
+                                ),
+                                contentDescription = null,
+                                tint = if (isDedupeChildPrimary) {
+                                    Color(NgTheme.colors.primary)
+                                } else {
+                                    Color(NgTheme.colors.onSurfaceVariant).copy(alpha = 0.65f)
+                                },
+                                modifier = Modifier.size(15.dp),
+                            )
+                        }
+                    }
+                } else if (showDedupeToggle) {
+                    Box(
+                        modifier = Modifier
+                            .padding(start = 6.dp)
+                            .size(24.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        if (hasDedupeChildren) {
+                            Box(
+                                modifier = Modifier
+                                    .size(22.dp)
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(
+                                        if (dedupeExpanded) {
+                                            Color(NgTheme.colors.primary)
+                                        } else {
+                                            Color(NgTheme.colors.surfaceVariant)
+                                        }
+                                    )
+                                    .clickable { onToggleDedupe?.invoke() },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_chevron_right_20),
+                                    contentDescription = null,
+                                    tint = if (dedupeExpanded) {
+                                        Color(NgTheme.colors.onPrimary)
+                                    } else {
+                                        Color(NgTheme.colors.onSurface)
+                                    },
+                                    modifier = Modifier
+                                        .size(15.dp)
+                                        .rotate(if (dedupeExpanded) 90f else 0f),
+                                )
+                            }
+                        }
+                    }
+                }
+                if (selectionState != null && onTriStateSelectionToggle != null) {
+                    NgFileSelectionTriStateCheckbox(
+                        state = selectionState,
+                        onClick = onTriStateSelectionToggle,
+                        variant = NgFileSelectionCheckboxVariant.COMPACT,
+                    )
+                } else {
+                    NgFileSelectionCheckbox(
+                        checked = selected,
+                        onCheckedChange = {
+                            onAction(BookSourceManageAction.SelectionChanged(source, it))
+                        },
+                        variant = NgFileSelectionCheckboxVariant.COMPACT,
+                    )
+                }
+                val reachabilityMap by BookSourceReachabilityStore.statusFlow.collectAsState()
+                val reachability = BookSourceReachabilityStore.resolve(source, reachabilityMap)
+                Row(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxHeight()
-                        .padding(start = 2.dp, end = 4.dp),
-                    contentAlignment = Alignment.CenterStart,
+                        .clickable {
+                            onAction(BookSourceManageAction.Edit(source))
+                        }
+                        .then(bodyDragModifier ?: Modifier),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(
-                        text = source.bookSourceName,
-                        color = titleColor,
-                        fontSize = 14.sp,
-                        lineHeight = 18.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
+                    Box(
+                        modifier = Modifier
+                            .padding(start = 2.dp, end = 6.dp)
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(
+                                when (reachability) {
+                                    BookSourceReachability.REACHABLE -> Color(0xFF22C55E)
+                                    BookSourceReachability.UNREACHABLE -> Color(0xFFEF4444)
+                                    BookSourceReachability.UNKNOWN -> Color(NgTheme.colors.onSurfaceVariant).copy(alpha = 0.22f)
+                                }
+                            ),
                     )
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                    source.formatTagLabel()?.let { labelRes ->
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .padding(end = 4.dp),
+                        contentAlignment = Alignment.CenterStart,
+                    ) {
+                        Text(
+                            text = source.bookSourceName,
+                            color = titleColor,
+                            fontSize = 14.sp,
+                            lineHeight = 18.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                        if (showDedupeToggle && dedupeDuplicateCount > 1) {
+                            BookSourceMiniTag(
+                                text = "×$dedupeDuplicateCount",
+                                containerColor = Color(NgTheme.colors.primaryContainer),
+                                contentColor = Color(NgTheme.colors.primary),
+                            )
+                        }
+                        source.formatTagLabel()?.let { labelRes ->
+                            BookSourceMiniTag(
+                                text = stringResource(labelRes),
+                                containerColor = Color(NgTheme.colors.primaryContainer),
+                                contentColor = Color(NgTheme.colors.primary),
+                            )
+                        }
                         BookSourceMiniTag(
-                            text = stringResource(labelRes),
+                            text = stringResource(source.typeTagLabel()),
                             containerColor = Color(NgTheme.colors.primaryContainer),
                             contentColor = Color(NgTheme.colors.primary),
                         )
-                    }
-                    BookSourceMiniTag(
-                        text = stringResource(source.typeTagLabel()),
-                        containerColor = Color(NgTheme.colors.primaryContainer),
-                        contentColor = Color(NgTheme.colors.primary),
-                    )
-                    if (source.hasSearchUrl) {
-                        BookSourceMiniTag(
-                            text = stringResource(R.string.book_source_capability_search_short),
-                            containerColor = colorResource(
-                                if (source.enabled) R.color.ng_success_container else R.color.ng_error_container
-                            ),
-                            contentColor = colorResource(
-                                if (source.enabled) R.color.ng_success else R.color.ng_error
-                            ),
-                        )
-                    }
-                    if (source.hasExploreUrl) {
-                        BookSourceMiniTag(
-                            text = stringResource(R.string.book_source_capability_explore_short),
-                            containerColor = colorResource(
-                                if (source.enabledExplore) R.color.ng_info_container else R.color.ng_error_container
-                            ),
-                            contentColor = colorResource(
-                                if (source.enabledExplore) R.color.ng_info else R.color.ng_error
-                            ),
-                        )
+                        if (source.hasSearchUrl) {
+                            BookSourceMiniTag(
+                                text = stringResource(R.string.book_source_capability_search_short),
+                                containerColor = colorResource(
+                                    if (source.enabled) R.color.ng_success_container else R.color.ng_error_container
+                                ),
+                                contentColor = colorResource(
+                                    if (source.enabled) R.color.ng_success else R.color.ng_error
+                                ),
+                            )
+                        }
+                        if (source.hasExploreUrl) {
+                            BookSourceMiniTag(
+                                text = stringResource(R.string.book_source_capability_explore_short),
+                                containerColor = colorResource(
+                                    if (source.enabledExplore) R.color.ng_info_container else R.color.ng_error_container
+                                ),
+                                contentColor = colorResource(
+                                    if (source.enabledExplore) R.color.ng_info else R.color.ng_error
+                                ),
+                            )
+                        }
                     }
                 }
-            }
-            Box(
-                modifier = Modifier
-                    .size(36.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .clickable {
-                        onAction(BookSourceManageAction.ConfigureCapabilities(source))
-                    },
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    painter = painterResource(R.drawable.ic_settings),
-                    contentDescription = stringResource(R.string.book_source_switches),
-                    tint = Color(NgTheme.colors.onSurface),
-                    modifier = Modifier.size(18.dp),
-                )
-            }
-            Box {
-                Box(
-                    modifier = Modifier
-                        .size(42.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(
-                            if (menuState.expanded) {
-                                Color(NgTheme.colors.selectedContainer)
+                Box {
+                    Box(
+                        modifier = Modifier
+                            .size(42.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(
+                                if (menuState.expanded) {
+                                    Color(NgTheme.colors.selectedContainer)
+                                } else {
+                                    Color.Transparent
+                                }
+                            )
+                            .clickable { menuState.onAnchorClick() },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_more_vert),
+                            contentDescription = stringResource(R.string.menu),
+                            tint = if (menuState.expanded) {
+                                Color(NgTheme.colors.primary)
                             } else {
-                                Color.Transparent
-                            }
+                                Color(NgTheme.colors.onSurface)
+                            },
+                            modifier = Modifier.size(20.dp),
                         )
-                        .clickable { menuState.onAnchorClick() },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_more_vert),
-                        contentDescription = stringResource(R.string.menu),
-                        tint = if (menuState.expanded) {
-                            Color(NgTheme.colors.primary)
-                        } else {
-                            Color(NgTheme.colors.onSurface)
+                    }
+                    NgExpandableActionMenu(
+                        expanded = menuState.expanded,
+                        onDismissRequest = menuState::onDismissRequest,
+                        items = sourceMenuItems(source, manualSort),
+                        onItemClick = {
+                            menuState.close()
+                            onAction(
+                                when (it.itemId) {
+                                    R.id.menu_top -> BookSourceManageAction.Top(source)
+                                    R.id.menu_bottom -> BookSourceManageAction.Bottom(source)
+                                    R.id.menu_login -> BookSourceManageAction.Login(source)
+                                    R.id.menu_search -> BookSourceManageAction.Search(source)
+                                    else -> BookSourceManageAction.Debug(source)
+                                }
+                            )
                         },
-                        modifier = Modifier.size(20.dp),
                     )
                 }
-                NgExpandableActionMenu(
-                    expanded = menuState.expanded,
-                    onDismissRequest = menuState::onDismissRequest,
-                    items = sourceMenuItems(source, manualSort),
-                    onItemClick = {
-                        menuState.close()
-                        onAction(
-                            when (it.itemId) {
-                                R.id.menu_edit -> BookSourceManageAction.Edit(source)
-                                R.id.menu_top -> BookSourceManageAction.Top(source)
-                                R.id.menu_bottom -> BookSourceManageAction.Bottom(source)
-                                R.id.menu_login -> BookSourceManageAction.Login(source)
-                                R.id.menu_search -> BookSourceManageAction.Search(source)
-                                R.id.menu_debug_source -> BookSourceManageAction.Debug(source)
-                                else -> BookSourceManageAction.Delete(source)
-                            }
-                        )
-                    },
-                )
+                Spacer(Modifier.width(4.dp))
             }
-            Spacer(Modifier.width(4.dp))
         }
         if (showDivider) {
             HorizontalDivider(
@@ -1240,13 +1805,6 @@ private fun sourceMenuItems(
     source: BookSourcePart,
     manualSort: Boolean,
 ): List<NgExpandableActionMenuItem> = buildList {
-    add(
-        NgExpandableActionMenuItem(
-            R.id.menu_edit,
-            R.string.edit,
-            R.drawable.ic_edit,
-        )
-    )
     if (source.hasSearchUrl) {
         add(NgExpandableActionMenuItem(R.id.menu_search, R.string.search, R.drawable.ic_search))
     }
@@ -1265,15 +1823,6 @@ private fun sourceMenuItems(
         )
         add(NgExpandableActionMenuItem(R.id.menu_bottom, R.string.to_bottom, R.drawable.ic_arrow_down))
     }
-    add(
-        NgExpandableActionMenuItem(
-            R.id.menu_del,
-            R.string.delete,
-            R.drawable.ic_book_info_delete,
-            dividerBefore = !manualSort,
-            danger = true,
-        )
-    )
 }
 
 @Composable
@@ -1306,6 +1855,6 @@ private fun BookSourcePart.typeTagLabel(): Int = when (bookSourceType) {
 }
 
 private fun String.isNormalSourceSection(): Boolean {
-    if (this == "校验超时") return false
+    if (this == "校验超时" || this == "源名称获取失败" || this == "非HTTP源地址") return false
     return listOf("失效", "异常", "错误", "无效", "规则为空").none(::contains)
 }

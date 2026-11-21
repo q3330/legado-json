@@ -137,13 +137,16 @@ object CheckSourceTaskStore {
         origin: String,
         durationMillis: Long,
         resultKind: CheckSourceResultKind = CheckSourceResultKind.STANDARD,
+        message: String = "",
+        sourceName: String? = null,
     ) {
         completeItem(
             origin = origin,
             status = CheckSourceItemStatus.PASSED,
-            message = "",
+            message = message,
             durationMillis = durationMillis,
             resultKind = resultKind,
+            sourceName = sourceName,
         )
     }
 
@@ -222,9 +225,11 @@ object CheckSourceTaskStore {
         message: String,
         durationMillis: Long,
         resultKind: CheckSourceResultKind = CheckSourceResultKind.STANDARD,
+        sourceName: String? = null,
     ) {
         updateItem(origin) { item ->
             item.copy(
+                sourceName = sourceName?.takeIf(String::isNotBlank) ?: item.sourceName,
                 status = status,
                 message = message,
                 durationMillis = durationMillis,

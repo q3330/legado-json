@@ -32,6 +32,7 @@ import io.legado.app.ui.design.theme.NgTheme
 
 internal enum class MyMenuAction {
     BOOK_SOURCE,
+    RSS_SOURCE,
     RULE,
     RESOURCE_CENTER,
     AI,
@@ -39,7 +40,11 @@ internal enum class MyMenuAction {
     SERVICE,
     BACKUP,
     APPEARANCE,
-    SETTINGS,
+    INTERFACE,
+    COVER,
+    GENERAL,
+    STORAGE,
+    ADVANCED,
     BOOKMARK,
     FILE_MANAGE,
     ABOUT,
@@ -58,6 +63,11 @@ private val primaryItems = listOf(
         R.string.book_source_manage,
         R.string.book_source_manage_desc,
         R.drawable.ic_cfg_source,
+    ),
+    MyMenuItem(
+        MyMenuAction.RSS_SOURCE,
+        R.string.rss_source_manage,
+        iconRes = R.drawable.ic_bottom_explore_e,
     ),
     MyMenuItem(
         MyMenuAction.RULE,
@@ -105,10 +115,34 @@ private val settingsItems = listOf(
         R.drawable.ic_cfg_theme,
     ),
     MyMenuItem(
-        MyMenuAction.SETTINGS,
-        R.string.setting,
-        R.string.settings_menu_summary,
+        MyMenuAction.INTERFACE,
+        R.string.interface_layout_setting,
+        R.string.interface_layout_setting_summary,
+        R.drawable.ic_interface_setting,
+    ),
+    MyMenuItem(
+        MyMenuAction.COVER,
+        R.string.cover_config,
+        R.string.cover_config_summary,
+        R.drawable.ic_image,
+    ),
+    MyMenuItem(
+        MyMenuAction.GENERAL,
+        R.string.general_setting,
+        R.string.general_setting_summary,
         R.drawable.ic_settings,
+    ),
+    MyMenuItem(
+        MyMenuAction.STORAGE,
+        R.string.storage_cache_setting,
+        R.string.storage_cache_setting_summary,
+        R.drawable.ic_storage_black_24dp,
+    ),
+    MyMenuItem(
+        MyMenuAction.ADVANCED,
+        R.string.advanced_setting,
+        R.string.advanced_setting_summary,
+        R.drawable.ic_cfg_other,
     ),
 )
 

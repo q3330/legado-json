@@ -25,6 +25,7 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.CircularProgressIndicator
@@ -36,6 +37,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -64,7 +66,10 @@ import io.legado.app.constant.AppLog
 import io.legado.app.data.entities.BaseSource
 import io.legado.app.data.entities.BookSource
 import io.legado.app.data.entities.BookSourcePart
+import io.legado.app.data.entities.SearchBook
 import io.legado.app.data.entities.rule.ExploreKind
+import io.legado.app.help.source.BookSourceReachability
+import io.legado.app.help.source.BookSourceReachabilityStore
 import io.legado.app.data.entities.rule.ExploreKind.Type
 import io.legado.app.help.source.ExploreKindRenderRole
 import io.legado.app.help.source.isSupportedExploreKind
@@ -92,15 +97,30 @@ internal fun ExploreScreen(
     query: String,
     groups: List<String>,
     selectedGroup: String?,
+    selectedType: Int?,
     layoutMode: ExploreLayoutMode,
+    modernStyle: Boolean,
+    modernState: ExploreModernUiState,
     expandedSourceUrl: String?,
     kindsBySource: Map<String, List<ExploreKind>>,
     loadingSourceUrls: Set<String>,
     bottomInsetPx: Int,
     scrollToTopToken: Long,
     transparentTopBar: Boolean,
+    onToggleModernStyle: () -> Unit,
+    onModernSelectSource: (BookSourcePart) -> Unit,
+    onModernSelectKind: (ExploreKind) -> Unit,
+    onModernRefresh: () -> Unit,
+    onModernRefreshKinds: () -> Unit,
+    onModernLoadMore: () -> Unit,
+    onModernJumpToPage: (Int) -> Unit,
+    onModernRetryContent: () -> Unit,
+    onModernToggleAutoTranslate: () -> Unit,
+    onModernLayoutModeChange: (io.legado.app.ui.book.explore.ExploreShowLayoutMode) -> Unit,
+    onModernOpenBook: (SearchBook) -> Unit,
     onQueryChange: (String) -> Unit,
     onGroupSelected: (String?) -> Unit,
+    onTypeSelected: (Int?) -> Unit,
     onLayoutModeChange: (ExploreLayoutMode) -> Unit,
     onManageSources: () -> Unit,
     onToggleSource: (BookSourcePart) -> Unit,
@@ -111,6 +131,9 @@ internal fun ExploreScreen(
     onRefreshSource: (BookSourcePart) -> Unit
 ) {
     val bottomInset = with(LocalDensity.current) { bottomInsetPx.toDp() }
+    var sourcePickerVisible by remember { mutableStateOf(false) }
+    var categoriesExpanded by remember(modernState.selectedSourceUrl) { mutableStateOf(false) }
+    var categoryAnchorX by remember { mutableStateOf<Float?>(null) }
 
     Column(
         modifier = Modifier
@@ -121,9 +144,21 @@ internal fun ExploreScreen(
             query = query,
             groups = groups,
             selectedGroup = selectedGroup,
+            selectedType = selectedType,
             layoutMode = layoutMode,
+            modernStyle = modernStyle,
+            currentSourceUrl = modernState.selectedSourceUrl,
+            currentSourceName = modernState.sourceName,
+            autoTranslateEnabled = modernState.autoTranslateEnabled,
+            categoriesExpanded = categoriesExpanded,
+            onOpenSourcePicker = { sourcePickerVisible = true },
+            onToggleAutoTranslate = onModernToggleAutoTranslate,
+            onToggleCategories = { categoriesExpanded = !categoriesExpanded },
+            onCategoryAnchorPosition = { categoryAnchorX = it },
+            onToggleModernStyle = onToggleModernStyle,
             onQueryChange = onQueryChange,
             onGroupSelected = onGroupSelected,
+            onTypeSelected = onTypeSelected,
             onLayoutModeChange = onLayoutModeChange,
             onManageSources = onManageSources,
         )
@@ -142,6 +177,28 @@ internal fun ExploreScreen(
                         ),
                     ),
                     modifier = Modifier.align(Alignment.Center)
+                )
+            } else if (modernStyle) {
+                ExploreModernView(
+                    sources = sources,
+                    state = modernState,
+                    bottomInset = bottomInset,
+                    categoriesExpanded = categoriesExpanded,
+                    onCategoriesExpandedChange = { categoriesExpanded = it },
+                    categoryAnchorX = categoryAnchorX,
+                    sourcePickerVisible = sourcePickerVisible,
+                    onDismissSourcePicker = { sourcePickerVisible = false },
+                    onSelectSource = onModernSelectSource,
+                    onSelectKind = onModernSelectKind,
+                    onRefresh = onModernRefresh,
+                    onRefreshKinds = onModernRefreshKinds,
+                    onLoadNext = onModernLoadMore,
+                    onJumpToPage = onModernJumpToPage,
+                    onRetryContent = onModernRetryContent,
+                    onLayoutModeChange = onModernLayoutModeChange,
+                    onOpenBook = onModernOpenBook,
+                    onShowError = onShowError,
+                    onSourceAction = onSourceAction,
                 )
             } else {
                 when (layoutMode) {
@@ -169,7 +226,7 @@ internal fun ExploreScreen(
                     )
 
                     ExploreLayoutMode.GROUP_GRID -> {
-                        if (query.isBlank() && selectedGroup == null) {
+                        if (query.isBlank() && selectedGroup == null && selectedType == null) {
                             ExploreGroupedSourceGrid(
                                 sources = sources,
                                 groups = groups,
@@ -250,6 +307,8 @@ internal fun ExploreGridSourceItem(
                 .padding(horizontal = 8.dp, vertical = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            val gridReachabilityMap by BookSourceReachabilityStore.statusFlow.collectAsState()
+            val gridReachability = BookSourceReachabilityStore.resolve(source, gridReachabilityMap)
             Box(
                 modifier = Modifier
                     .size(50.dp)
@@ -272,6 +331,22 @@ internal fun ExploreGridSourceItem(
                         color = tileContentColor,
                         fontSize = 22.sp,
                         fontWeight = FontWeight.Bold
+                    )
+                }
+                if (gridReachability != BookSourceReachability.UNKNOWN) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(4.dp)
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (gridReachability == BookSourceReachability.REACHABLE) {
+                                    Color(0xFF22C55E)
+                                } else {
+                                    Color(0xFFEF4444)
+                                }
+                            )
                     )
                 }
             }
@@ -410,6 +485,8 @@ private fun ExploreListSourceItem(
                         .padding(start = 14.dp, end = 12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    val listReachabilityMap by BookSourceReachabilityStore.statusFlow.collectAsState()
+                    val listReachability = BookSourceReachabilityStore.resolve(source, listReachabilityMap)
                     Text(
                         text = source.bookSourceName,
                         color = Color(NgTheme.colors.onSurface),
@@ -425,6 +502,21 @@ private fun ExploreListSourceItem(
                             strokeWidth = 2.dp
                         )
                         Spacer(Modifier.width(6.dp))
+                    }
+                    if (listReachability != BookSourceReachability.UNKNOWN) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    if (listReachability == BookSourceReachability.REACHABLE) {
+                                        Color(0xFF22C55E)
+                                    } else {
+                                        Color(0xFFEF4444)
+                                    }
+                                )
+                        )
+                        Spacer(Modifier.width(8.dp))
                     }
                     Icon(
                         painter = painterResource(
@@ -460,7 +552,7 @@ private fun ExploreListSourceItem(
 }
 
 @Composable
-private fun ExploreSourceMenu(
+internal fun ExploreSourceMenu(
     source: BookSourcePart,
     expanded: Boolean,
     onDismiss: () -> Unit,

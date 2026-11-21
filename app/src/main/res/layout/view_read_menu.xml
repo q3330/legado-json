@@ -175,7 +175,7 @@
                     android:padding="6dp"
                     android:src="@drawable/ic_refresh_black_24dp"
                     app:layout_constraintBottom_toBottomOf="@+id/top_action_toolbar_host"
-                    app:layout_constraintEnd_toStartOf="@+id/iv_header_download"
+                    app:layout_constraintEnd_toStartOf="@+id/iv_header_translate"
                     app:layout_constraintTop_toTopOf="@+id/top_action_toolbar_host" />
 
                 <androidx.appcompat.widget.AppCompatImageButton
@@ -188,6 +188,18 @@
                     android:src="@drawable/ic_exchange"
                     app:layout_constraintBottom_toBottomOf="@+id/top_action_toolbar_host"
                     app:layout_constraintEnd_toStartOf="@+id/iv_header_refresh"
+                    app:layout_constraintTop_toTopOf="@+id/top_action_toolbar_host" />
+
+                <androidx.appcompat.widget.AppCompatImageButton
+                    android:id="@+id/iv_header_translate"
+                    android:layout_width="48dp"
+                    android:layout_height="36dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="@string/explore_auto_translate"
+                    android:padding="6dp"
+                    android:src="@drawable/ic_translate"
+                    app:layout_constraintBottom_toBottomOf="@+id/top_action_toolbar_host"
+                    app:layout_constraintEnd_toStartOf="@+id/iv_header_download"
                     app:layout_constraintTop_toTopOf="@+id/top_action_toolbar_host" />
 
                 <androidx.appcompat.widget.AppCompatImageButton

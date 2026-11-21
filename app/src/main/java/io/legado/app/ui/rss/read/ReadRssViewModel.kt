@@ -17,6 +17,7 @@ import io.legado.app.data.entities.RssSource
 import io.legado.app.data.entities.RssStar
 import io.legado.app.exception.NoStackTraceException
 import io.legado.app.help.TTS
+import io.legado.app.help.source.RssSourceReachabilityStore
 import io.legado.app.help.http.newCallResponseBody
 import io.legado.app.help.http.okHttpClient
 import io.legado.app.help.webView.WebJsExtensions.Companion.JS_URL
@@ -118,6 +119,7 @@ class ReadRssViewModel(application: Application) : BaseViewModel(application) {
         val source = rssSource ?: return
         Rss.getContent(viewModelScope, rssArticle, ruleContent, source)
             .onSuccess(IO) { body ->
+                RssSourceReachabilityStore.markReachable(source.sourceUrl)
                 rssArticle.description = body
                 appDb.rssArticleDao.insert(rssArticle)
                 rssStar?.let {
@@ -127,6 +129,7 @@ class ReadRssViewModel(application: Application) : BaseViewModel(application) {
                 this@ReadRssViewModel.rssArticle = rssArticle
                 contentLiveData.postValue(body)
             }.onError {
+                RssSourceReachabilityStore.markUnreachable(source.sourceUrl)
                 contentLiveData.postValue("加载正文失败\n${it.stackTraceToString()}")
             }
     }

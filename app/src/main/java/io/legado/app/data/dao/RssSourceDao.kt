@@ -65,6 +65,21 @@ interface RssSourceDao {
     @Query("select * from rssSources where sourceGroup is null or sourceGroup = '' or sourceGroup like '%未分组%'")
     fun flowNoGroup(): Flow<List<RssSource>>
 
+    @Query("SELECT * FROM rssSources where type = :type order by customOrder")
+    fun flowByType(type: Int): Flow<List<RssSource>>
+
+    @Query("SELECT * FROM rssSources where singleUrl = 1 order by customOrder")
+    fun flowSingleUrl(): Flow<List<RssSource>>
+
+    @Query("update rssSources set enabled = :enable where sourceUrl in (:urls)")
+    fun enableByUrls(urls: List<String>, enable: Boolean)
+
+    @Query("update rssSources set type = :type where sourceUrl in (:urls)")
+    fun updateTypeByUrls(urls: List<String>, type: Int)
+
+    @Query("update rssSources set sourceGroup = null where sourceUrl in (:urls)")
+    fun clearGroupsByUrls(urls: List<String>)
+
     @Query(
         """SELECT * FROM rssSources 
         where enabled = 1 

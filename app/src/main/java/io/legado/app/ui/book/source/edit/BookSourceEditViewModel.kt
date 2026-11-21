@@ -16,8 +16,10 @@ import io.legado.app.help.http.newCallStrResponse
 import io.legado.app.help.http.okHttpClient
 import io.legado.app.help.source.SourceHelp
 import io.legado.app.help.source.clearExploreKindsCache
+import io.legado.app.model.jsSource.isJsSource
 import io.legado.app.help.storage.ImportOldData
 import io.legado.app.model.SharedJsScope
+import io.legado.app.utils.FileUtils
 import io.legado.app.utils.GSON
 import io.legado.app.utils.fromJsonArray
 import io.legado.app.utils.fromJsonObject
@@ -26,10 +28,14 @@ import io.legado.app.utils.isAbsUrl
 import io.legado.app.utils.isJsonArray
 import io.legado.app.utils.isJsonObject
 import io.legado.app.utils.jsonPath
+import io.legado.app.utils.normalizeFileName
 import io.legado.app.utils.printOnDebug
 import io.legado.app.utils.removeCookie
+import io.legado.app.utils.stackTraceStr
 import io.legado.app.utils.toastOnUi
+import io.legado.app.utils.writeToOutputStream
 import kotlinx.coroutines.Dispatchers
+import java.io.File
 
 
 class BookSourceEditViewModel(application: Application) : BaseViewModel(application) {
@@ -56,6 +62,10 @@ class BookSourceEditViewModel(application: Application) : BaseViewModel(applicat
             if (source.bookSourceUrl.isBlank() || source.bookSourceName.isBlank()) {
                 throw NoStackTraceException(context.getString(R.string.non_null_name_url))
             }
+            val hasSearchRule = !source.searchUrl.isNullOrBlank() || !source.mainJs.isNullOrBlank()
+            val hasExploreRule = !source.exploreUrl.isNullOrBlank()
+            if (!hasSearchRule) source.enabled = false
+            if (!hasExploreRule) source.enabledExplore = false
             val oldSource = bookSource ?: BookSource()
             if (!source.equal(oldSource)) {
                 source.lastUpdateTime = System.currentTimeMillis()
@@ -70,7 +80,6 @@ class BookSourceEditViewModel(application: Application) : BaseViewModel(applicat
                 if (it.bookSourceUrl != source.bookSourceUrl) {
                     SourceHelp.deleteBookSource(it.bookSourceUrl)
                 } else {
-                    appDb.bookSourceDao.delete(it)
                     SourceConfig.removeSource(it.bookSourceUrl)
                 }
             }
@@ -145,6 +154,31 @@ class BookSourceEditViewModel(application: Application) : BaseViewModel(applicat
         execute {
             BookSourceCookieStore(url).removeCookie(url)
             CookieManager.getInstance().removeCookie(url)
+        }
+    }
+
+    fun saveToFile(source: BookSource, success: (file: File, name: String) -> Unit) {
+        execute {
+            val baseName = source.bookSourceName.ifBlank { "未命名书源" }.normalizeFileName()
+            if (source.isJsSource()) {
+                val outputName = "$baseName.js"
+                val file = File(context.cacheDir, outputName)
+                file.writeText(source.mainJs.orEmpty())
+                file to outputName
+            } else {
+                val outputName = "bookSource_$baseName.json"
+                val path = "${context.filesDir}/shareBookSource.json"
+                FileUtils.delete(path)
+                val file = FileUtils.createFileWithReplace(path)
+                file.outputStream().buffered().use {
+                    GSON.writeToOutputStream(it, listOf(source))
+                }
+                file to outputName
+            }
+        }.onSuccess {
+            success.invoke(it.first, it.second)
+        }.onError {
+            context.toastOnUi(it.stackTraceStr)
         }
     }
 

@@ -15,7 +15,7 @@
     <string name="text_selection_system_actions_hint">System apps appear at the end of More</string>
     <string name="switch_selection_read_mode">Switch selected-text read mode</string>
     <!--App-->
-    <string name="app_name">Legado 书源</string>
+    <string name="app_name">阅读-源</string>
     <string name="receiving_shared_label">Legado 书源·search</string>
     <string name="tip_perm_request_storage">Legado needs storage access to find and read books. please go "App Settings" to allow "Storage permission".</string>
 
@@ -70,6 +70,7 @@
     <string name="auto_load_book_other_works">Load related</string>
     <string name="book_info_settings">Book settings</string>
     <string name="source_editor_settings">Editor settings</string>
+    <string name="source_editor_save_local">Save to local</string>
     <string name="source_editor_import_share">Import and share</string>
     <string name="source_editor_appearance">Appearance</string>
     <string name="source_editor_theme">Editor theme</string>
@@ -325,7 +326,11 @@
     <string name="book_source_manage">Sources management</string>
     <string name="book_source_manage_desc">Create/Import/Edit/Manage Book sources</string>
     <string name="rule_management">Rule management</string>
-    <string name="rule_management_summary">Manage TXT catalog, replacement, and dictionary rules</string>
+    <string name="rule_management_summary">Manage TXT catalog, replacement, dictionary, and translation rules</string>
+    <string name="translate_api">Translation API</string>
+    <string name="translate_api_desc">Manage translation engines and history</string>
+    <string name="book_original_name_show">Original: %s</string>
+    <string name="explore_auto_translate">Auto translate titles</string>
     <string name="browse_history">Browse history</string>
     <string name="setting">Settings</string>
     <string name="settings_menu_summary">Interface, general, storage, and advanced settings</string>
@@ -2308,7 +2313,7 @@
     <string name="video_setting">视频设置</string>
     <string name="video_setting_summary">自动播放、全屏播放等配置</string>
     <string name="history">历史记录</string>
-    <string name="app_name_ng">Legado 书源</string>
+    <string name="app_name_ng">阅读-源</string>
     <string name="about_description_ng">致力于打造下一代阅读体验</string>
     <string name="contributors_summary_ng">详情请在 GitHub 中查看</string>
     <string name="about_action_github">GitHub</string>
@@ -2670,6 +2675,42 @@
     <string name="book_source_add_rules">New rules source</string>
     <string name="book_source_add_javascript">New JS source</string>
     <string name="book_source_filter_type">Type filter</string>
+    <string name="book_source_type_manage">Type management</string>
+    <string name="copy_log">Copy log</string>
+    <string name="book_source_dedupe_manage">Dedupe management</string>
+    <string name="book_source_dedupe_none">No dedupe</string>
+    <string name="book_source_dedupe_url">Source URL</string>
+    <string name="book_source_dedupe_name">Source name</string>
+    <string name="book_source_dedupe_expand_all">Expand all</string>
+    <string name="book_source_dedupe_collapse_all">Collapse all</string>
+    <string name="explore_type_sources">Source types</string>
+    <string name="book_source_check_sync_site_name">Update source name</string>
+    <string name="book_source_check_sync_site_name_summary">Fetch real website name during domain, search, or discovery check and overwrite source name</string>
+    <string name="auto_group_r18_detection">R18 detection</string>
+    <string name="auto_group_r18_detection_summary">Detect R18 sources and append R18 group (preserves existing groups)</string>
+    <string name="book_source_fetch_site_name">Fetch source name</string>
+    <string name="book_source_fetch_site_name_action">Fetch</string>
+    <string name="book_source_fetch_site_name_write">Write</string>
+    <string name="book_source_fetch_site_name_result">Website name</string>
+    <string name="book_source_fetch_site_name_empty_url">Please enter a valid source URL</string>
+    <string name="book_source_fetch_site_name_failed">Failed to fetch website name</string>
+    <string name="check_select_source_text">Check text</string>
+    <string name="check_select_source_image">Check images</string>
+    <string name="check_select_source_video">Check videos</string>
+    <string name="check_select_source_audio">Check audio</string>
+    <string name="check_select_source_file">Check files</string>
+    <string name="book_source_check_auto_type_hint">Automatically matches content validation by source type (text length, image URLs, audio/video links, file downloads)</string>
+    <string name="book_source_check_type_section">Content validation</string>
+    <string name="book_source_check_text_min_length">Min valid text length (0 = off)</string>
+    <string name="book_source_check_image_reachable">Probe sample image URLs</string>
+    <string name="book_source_check_image_reachable_summary">Require valid img tags and lightly probe first %1$d image URLs</string>
+    <string name="book_source_check_audio_reachable">Probe audio stream URL</string>
+    <string name="book_source_check_audio_reachable_summary">Require valid audio URL returning non-HTML response</string>
+    <string name="book_source_check_video_reachable">Probe video playback URL</string>
+    <string name="book_source_check_video_reachable_summary">Require player launch or reachable video/player URL</string>
+    <string name="book_source_check_file_download">Download links</string>
+    <string name="book_source_check_file_reachable">Probe file download URL</string>
+    <string name="book_source_check_file_reachable_summary">Require valid download URLs and probe first link</string>
     <string name="book_source_filter_type_text">Text</string>
     <string name="book_source_filter_type_image">Image</string>
     <string name="book_source_filter_type_video">Video</string>

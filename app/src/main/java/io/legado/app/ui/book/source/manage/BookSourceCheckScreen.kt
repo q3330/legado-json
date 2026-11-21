@@ -70,6 +70,7 @@ internal fun BookSourceCheckScreen(
     onBack: () -> Unit,
     onCancel: () -> Unit,
     onHandleResults: () -> Unit,
+    titleText: String = stringResource(R.string.book_source_check_task_title),
 ) {
     var filter by remember(state.runId) { mutableStateOf(CheckSourceResultFilter.ALL) }
     val visibleItems = remember(state.items, filter) {
@@ -91,7 +92,7 @@ internal fun BookSourceCheckScreen(
             .statusBarsPadding()
             .navigationBarsPadding(),
     ) {
-        BookSourceCheckTopBar(onBack)
+        BookSourceCheckTopBar(onBack = onBack, titleText = titleText)
         BookSourceCheckSummary(
             state = state,
             onCancel = onCancel,
@@ -111,7 +112,10 @@ internal fun BookSourceCheckScreen(
 }
 
 @Composable
-private fun BookSourceCheckTopBar(onBack: () -> Unit) {
+private fun BookSourceCheckTopBar(
+    onBack: () -> Unit,
+    titleText: String = stringResource(R.string.book_source_check_task_title),
+) {
     NgGlassSurface(
         modifier = Modifier
             .fillMaxWidth()
@@ -132,7 +136,7 @@ private fun BookSourceCheckTopBar(onBack: () -> Unit) {
             NgFloatingToolbarBackButton(onClick = onBack, width = 44.dp)
             Spacer(Modifier.width(2.dp))
             Text(
-                text = stringResource(R.string.book_source_check_task_title),
+                text = titleText,
                 color = Color(NgTheme.colors.onSurface),
                 fontSize = 20.sp,
                 lineHeight = 24.sp,
@@ -577,12 +581,12 @@ private fun resultStatusText(item: CheckSourceItemState): String {
 private fun resultSummary(item: CheckSourceItemState): String {
     return when (item.status) {
         CheckSourceItemStatus.FAILED -> item.message
-        CheckSourceItemStatus.PASSED -> if (
-            item.resultKind == CheckSourceResultKind.CONTENT_PARSED
-        ) {
-            stringResource(R.string.book_source_check_parsed_summary)
-        } else {
-            formatDuration(item.durationMillis)
+        CheckSourceItemStatus.PASSED -> when {
+            item.message.isNotBlank() -> "${item.message} · ${formatDuration(item.durationMillis)}"
+            item.resultKind == CheckSourceResultKind.CONTENT_PARSED -> {
+                stringResource(R.string.book_source_check_parsed_summary)
+            }
+            else -> formatDuration(item.durationMillis)
         }
         else -> item.message
     }

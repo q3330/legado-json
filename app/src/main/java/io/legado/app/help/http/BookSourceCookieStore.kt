@@ -171,6 +171,12 @@ class BookSourceCookieStore(
             clear(listOf(sourceUrl))
         }
 
+        fun clearAll() {
+            val prefix = "book_source_cookie_"
+            appDb.cookieDao.deleteByPrefix(prefix)
+            CacheManager.deleteMemoryWhere { it.startsWith(prefix) }
+        }
+
         fun clear(sourceUrls: Collection<String>) {
             if (sourceUrls.isEmpty()) return
             val prefix = "book_source_cookie_"

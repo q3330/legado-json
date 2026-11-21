@@ -13,7 +13,9 @@ import io.legado.app.help.AppWebDav
 import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.ContentProcessor
 import io.legado.app.help.book.isEpub
+import io.legado.app.help.book.isAudio
 import io.legado.app.help.book.isImage
+import io.legado.app.help.book.isVideo
 import io.legado.app.help.book.isLocal
 import io.legado.app.help.book.isPdf
 import io.legado.app.help.book.isSameNameAuthor
@@ -1042,6 +1044,82 @@ object ReadBook : CoroutineScope by MainScope() {
         loadingChapters.remove(index)
     }
 
+    private suspend fun translateBookContentIfNeeded(
+        book: Book,
+        chapterIndex: Int,
+        displayTitle: String,
+        contents: io.legado.app.help.book.BookContent,
+    ): Pair<String, io.legado.app.help.book.BookContent> {
+        if (!io.legado.app.help.translate.TranslateConfig.isBookContentTranslateEnabled(book.bookUrl) ||
+            book.isImage || book.isAudio || book.isVideo
+        ) {
+            return displayTitle to contents
+        }
+        val indent = ReadBookConfig.paragraphIndent
+        val offlineChapter = io.legado.app.help.translate.TranslateHistoryStore.findOfflineChapter(
+            bookKey = book.bookUrl,
+            chapterIndex = chapterIndex,
+        )
+        val offlineMap = offlineChapter?.paragraphs?.associate { it.original to it.translated }.orEmpty()
+        val toTranslate = LinkedHashSet<String>()
+        if (offlineChapter == null && io.legado.app.help.translate.BookTitleTranslator.needsTranslation(displayTitle)) {
+            toTranslate.add(displayTitle.trim())
+        }
+        contents.textList.forEach { line ->
+            val plain = line.removePrefix(indent).trim()
+            if (plain.isNotEmpty() && !plain.startsWith("<img", ignoreCase = true) &&
+                plain !in offlineMap &&
+                io.legado.app.help.translate.BookTitleTranslator.needsTranslation(plain)
+            ) {
+                toTranslate.add(plain)
+            }
+        }
+        val onlineMap = if (toTranslate.isNotEmpty()) {
+            io.legado.app.help.translate.BookTitleTranslator.translateBatch(toTranslate.toList())
+        } else {
+            emptyMap()
+        }
+        val mergedMap = offlineMap + onlineMap
+        val translatedTitle = offlineChapter?.translatedChapterTitle?.takeIf { it.isNotBlank() }
+            ?: mergedMap[displayTitle.trim()]
+            ?: displayTitle
+        if (mergedMap.isEmpty() && translatedTitle == displayTitle) {
+            return displayTitle to contents
+        }
+        val pairs = ArrayList<io.legado.app.help.translate.TranslatedParagraphPair>()
+        val translatedList = contents.textList.map { line ->
+            val hasIndent = indent.isNotEmpty() && line.startsWith(indent)
+            val plain = if (hasIndent) line.removePrefix(indent).trim() else line.trim()
+            val translated = mergedMap[plain]
+            if (!translated.isNullOrBlank()) {
+                pairs.add(io.legado.app.help.translate.TranslatedParagraphPair(plain, translated))
+                if (hasIndent) "$indent$translated" else translated
+            } else {
+                if (plain.isNotEmpty() && !plain.startsWith("<img", ignoreCase = true)) {
+                    pairs.add(io.legado.app.help.translate.TranslatedParagraphPair(plain, plain))
+                }
+                line
+            }
+        }
+        if (onlineMap.isNotEmpty() && pairs.isNotEmpty()) {
+            io.legado.app.help.translate.TranslateHistoryStore.recordChapter(
+                bookKey = book.bookUrl,
+                originalTitle = book.name,
+                translatedTitle = io.legado.app.help.translate.BookTitleTranslator.getCached(book.name),
+                chapterIndex = chapterIndex,
+                originalChapterTitle = displayTitle,
+                translatedChapterTitle = translatedTitle,
+                paragraphs = pairs,
+            )
+        }
+        val nextContents = io.legado.app.help.book.BookContent(
+            sameTitleRemoved = contents.sameTitleRemoved,
+            textList = translatedList,
+            effectiveReplaceRules = contents.effectiveReplaceRules,
+        ).also { it.positionMap = contents.positionMap }
+        return translatedTitle to nextContents
+    }
+
     /**
      * 内容加载完成
      */
@@ -1072,13 +1150,14 @@ object ReadBook : CoroutineScope by MainScope() {
                 replaceBook = book.toReplaceBook()
             )
             startup?.mark("title-ready")
-            val contents = contentProcessor
+            val rawContents = contentProcessor
                 .getContent(book, chapter, content, includeTitle = false)
+            val (finalTitle, contents) = translateBookContentIfNeeded(book, chapter.index, displayTitle, rawContents)
             startup?.mark("processed")
             ensureActive()
             ensureLoadCurrent(book, generation)
             val textChapter = ChapterProvider.getTextChapterAsync(
-                this, book, chapter, displayTitle, contents, simulatedChapterSize
+                this, book, chapter, finalTitle, contents, simulatedChapterSize
             )
             startup?.mark("native-created")
             when (val offset = chapter.index - durChapterIndex) {
@@ -1179,11 +1258,12 @@ object ReadBook : CoroutineScope by MainScope() {
                 book.getUseReplaceRule(),
                 replaceBook = book.toReplaceBook()
             )
-            val contents = contentProcessor
+            val rawContents = contentProcessor
                 .getContent(book, chapter, content, includeTitle = false)
+            val (finalTitle, contents) = translateBookContentIfNeeded(book, chapter.index, displayTitle, rawContents)
             ensureLoadCurrent(book, generation)
             val textChapter = ChapterProvider.getTextChapterAsync(
-                CoroutineScope(kotlin.coroutines.coroutineContext), book, chapter, displayTitle, contents, simulatedChapterSize
+                CoroutineScope(kotlin.coroutines.coroutineContext), book, chapter, finalTitle, contents, simulatedChapterSize
             )
             when (val offset = chapter.index - durChapterIndex) {
                 0 -> {

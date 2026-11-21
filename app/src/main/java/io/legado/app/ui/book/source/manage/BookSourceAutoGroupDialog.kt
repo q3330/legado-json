@@ -63,6 +63,11 @@ internal fun BookSourceAutoGroupDialog(
                 titleRes = R.string.auto_group_url_category,
                 summaryRes = R.string.auto_group_url_category_summary,
             ),
+            AutoGroupRuleItem(
+                type = BookSourceAutoGroupRuleType.R18_DETECTION,
+                titleRes = R.string.auto_group_r18_detection,
+                summaryRes = R.string.auto_group_r18_detection_summary,
+            ),
         )
     }
     var selectedRuleTypes by remember {

@@ -2,11 +2,13 @@ package io.legado.app.ui.book.source.manage
 
 import android.content.Intent
 import android.os.Bundle
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.referentialEqualityPolicy
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.lifecycleScope
 import io.legado.app.R
@@ -16,6 +18,9 @@ import io.legado.app.constant.AppLog
 import io.legado.app.constant.AppPattern
 import io.legado.app.data.appDb
 import io.legado.app.data.entities.BookSourcePart
+import io.legado.app.help.config.AppConfig
+import io.legado.app.help.source.BookSourceDedupe
+import io.legado.app.help.source.BookSourceDedupeMode
 import io.legado.app.model.CheckSource
 import io.legado.app.model.CheckSourceTaskStatus
 import io.legado.app.model.CheckSourceTaskStore
@@ -43,12 +48,15 @@ import io.legado.app.utils.takePersistableReadPermission
 import io.legado.app.utils.toastOnUi
 import io.legado.app.utils.viewbindingdelegate.viewBinding
 import kotlinx.coroutines.Dispatchers.IO
+import kotlinx.coroutines.Dispatchers.Main
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.Locale
 
 private enum class BookSourceInputRequest { IMPORT_ONLINE }
@@ -93,6 +101,14 @@ class BookSourceActivity :
     private var sort by mutableStateOf(BookSourceSort.Default)
     private var sortAscending by mutableStateOf(true)
     private var expandedSections by mutableStateOf<Set<String>>(emptySet())
+    private var dedupeMode by mutableStateOf(
+        BookSourceDedupeMode.from(AppConfig.bookSourceDedupeMode)
+    )
+    private var ruleScores by mutableStateOf(BookSourceDedupe.getCachedRuleScores())
+    private var preferredPrimaries by mutableStateOf(
+        BookSourceDedupe.loadPreferredPrimaries(BookSourceDedupeMode.from(AppConfig.bookSourceDedupeMode))
+    )
+    private var expandedDedupeKeys by mutableStateOf<Set<String>>(emptySet())
     private var inputRequest by mutableStateOf<BookSourceInputRequest?>(null)
     private var deleteConfirmRequest by mutableStateOf<BookSourceDeleteConfirmRequest?>(null)
     private var sectionDeleteRequest by mutableStateOf<BookSourceSectionDeleteRequest?>(null)
@@ -100,8 +116,30 @@ class BookSourceActivity :
     private var clearGroupsRequest by mutableStateOf<List<BookSourcePart>?>(null)
     private var switchRequest by mutableStateOf<BookSourcePart?>(null)
     private var selectionCapabilityRequest by mutableStateOf<List<BookSourcePart>?>(null)
+    private var selectionTypeRequest by mutableStateOf<List<BookSourcePart>?>(null)
     private var checkRequest by mutableStateOf<List<BookSourcePart>?>(null)
     private var sourceFlowJob: Job? = null
+    private var ruleScoresJob: Job? = null
+
+    private val editSourceResult = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode != RESULT_OK) return@registerForActivityResult
+        val origin = result.data?.getStringExtra("origin")
+        if (origin.isNullOrBlank()) return@registerForActivityResult
+        lifecycleScope.launch(IO) {
+            val updatedPart = appDb.bookSourceDao.getBookSourcePart(origin) ?: return@launch
+            withContext(Main) {
+                val current = sources
+                val index = current.indexOfFirst { it.bookSourceUrl == origin }
+                if (index >= 0) {
+                    val patched = current.toMutableList()
+                    patched[index] = updatedPart
+                    sources = sortSources(patched)
+                }
+            }
+        }
+    }
 
     private val qrResult = registerForActivityResult(QrCodeResult()) {
         it ?: return@registerForActivityResult
@@ -131,6 +169,10 @@ class BookSourceActivity :
                     sort = sort,
                     sortAscending = sortAscending,
                     expandedSections = expandedSections,
+                    dedupeMode = dedupeMode,
+                    ruleScores = ruleScores,
+                    preferredPrimaries = preferredPrimaries,
+                    expandedDedupeKeys = expandedDedupeKeys,
                     checkTaskState = checkTaskState,
                     onAction = ::handleAction,
                 )
@@ -231,8 +273,26 @@ class BookSourceActivity :
                         },
                     )
                 }
+                selectionTypeRequest?.let { selection ->
+                    BookSourceSelectionTypeDialog(
+                        sources = selection,
+                        onDismiss = { selectionTypeRequest = null },
+                        onSelectType = { bookSourceType ->
+                            viewModel.updateSelectionType(selection, bookSourceType)
+                            selectionTypeRequest = null
+                        },
+                    )
+                }
                 checkRequest?.let { selection ->
+                    val targetType = remember(selection) {
+                        if (selection.isEmpty()) null
+                        else {
+                            val firstType = selection.first().bookSourceType
+                            if (selection.all { it.bookSourceType == firstType }) firstType else null
+                        }
+                    }
                     BookSourceCheckDialog(
+                        targetType = targetType,
                         onDismiss = { checkRequest = null },
                         onConfirm = { result ->
                             startCheckSource(selection, result)
@@ -245,6 +305,7 @@ class BookSourceActivity :
         lifecycleScope.launch {
             appDb.bookSourceDao.flowGroups().conflate().collect { groups = it }
         }
+        refreshRuleScores()
         updateSourceFlow()
     }
 
@@ -284,6 +345,9 @@ class BookSourceActivity :
             BookSourceManageAction.SelectAll -> {
                 selectedUrls = selectableSources().mapTo(linkedSetOf(), BookSourcePart::bookSourceUrl)
             }
+            BookSourceManageAction.ClearSelection -> {
+                selectedUrls = emptySet()
+            }
             BookSourceManageAction.InvertSelection -> {
                 selectedUrls = selectableSources().mapNotNullTo(linkedSetOf()) {
                     it.bookSourceUrl.takeUnless(selectedUrls::contains)
@@ -297,6 +361,9 @@ class BookSourceActivity :
             }
             BookSourceManageAction.ConfigureSelectionCapabilities -> {
                 if (selection.isNotEmpty()) selectionCapabilityRequest = selection
+            }
+            BookSourceManageAction.ConfigureSelectionType -> {
+                if (selection.isNotEmpty()) selectionTypeRequest = selection
             }
             BookSourceManageAction.AddSelectionToGroup -> if (selection.isNotEmpty()) {
                 BookSourceAddGroupSheet(
@@ -342,6 +409,63 @@ class BookSourceActivity :
                 sort = action.sort
                 updateSourceFlow()
             }
+            is BookSourceManageAction.DedupeModeChanged -> {
+                if (dedupeMode != action.mode) {
+                    dedupeMode = action.mode
+                    AppConfig.bookSourceDedupeMode = action.mode.value
+                    preferredPrimaries = BookSourceDedupe.loadPreferredPrimaries(action.mode)
+                    expandedDedupeKeys = emptySet()
+                    if (action.mode != BookSourceDedupeMode.NONE) {
+                        refreshRuleScores()
+                        viewModel.disableNonPrimaryDuplicates(action.mode, preferredPrimaries)
+                    }
+                }
+            }
+            is BookSourceManageAction.ToggleDedupeNode -> {
+                expandedDedupeKeys = expandedDedupeKeys.toMutableSet().apply {
+                    if (!add(action.groupKey)) remove(action.groupKey)
+                }
+            }
+            is BookSourceManageAction.SetDedupePrimary -> {
+                if (dedupeMode != BookSourceDedupeMode.NONE) {
+                    val updatedPreferred = BookSourceDedupe.savePreferredPrimary(
+                        mode = dedupeMode,
+                        groupKey = action.groupKey,
+                        sourceUrl = action.source.bookSourceUrl,
+                    )
+                    preferredPrimaries = updatedPreferred
+                    val groupNode = BookSourceDedupe.buildTree(
+                        sources,
+                        dedupeMode,
+                        ruleScores,
+                        updatedPreferred,
+                    ).firstOrNull { it.groupKey == action.groupKey }
+                    if (groupNode != null) {
+                        viewModel.switchDedupePrimaryEnabled(action.source, groupNode.allSources)
+                    } else {
+                        viewModel.disableNonPrimaryDuplicates(dedupeMode, updatedPreferred)
+                    }
+                }
+            }
+            BookSourceManageAction.ToggleAllDedupe -> {
+                if (dedupeMode != BookSourceDedupeMode.NONE) {
+                    val allExpandable = BookSourceDedupe.buildTree(
+                        sources,
+                        dedupeMode,
+                        ruleScores,
+                        preferredPrimaries,
+                    )
+                        .filter { it.hasDuplicates }
+                        .mapTo(linkedSetOf()) { it.groupKey }
+                    expandedDedupeKeys = if (allExpandable.isNotEmpty() &&
+                        allExpandable.all { it in expandedDedupeKeys }
+                    ) {
+                        emptySet()
+                    } else {
+                        allExpandable
+                    }
+                }
+            }
             is BookSourceManageAction.SelectionChanged -> updateSelection(
                 action.source.bookSourceUrl,
                 action.selected,
@@ -365,6 +489,12 @@ class BookSourceActivity :
                     sources = listOf(action.source),
                     itemName = action.source.bookSourceName,
                 )
+            }
+            is BookSourceManageAction.SwipeDelete -> {
+                val targetUrl = action.source.bookSourceUrl
+                sources = sources.filterNot { it.bookSourceUrl == targetUrl }
+                selectedUrls = selectedUrls - targetUrl
+                viewModel.del(listOf(action.source))
             }
             is BookSourceManageAction.Top -> {
                 if (sortAscending) viewModel.topSource(action.source)
@@ -398,9 +528,13 @@ class BookSourceActivity :
 
     private fun editSource(source: BookSourcePart) {
         if (source.hasJs) {
-            startActivity<JsSourceEditActivity> { putExtra("sourceUrl", source.bookSourceUrl) }
+            editSourceResult.launch(
+                Intent(this, JsSourceEditActivity::class.java).putExtra("sourceUrl", source.bookSourceUrl)
+            )
         } else {
-            startActivity<BookSourceEditActivity> { putExtra("sourceUrl", source.bookSourceUrl) }
+            editSourceResult.launch(
+                Intent(this, BookSourceEditActivity::class.java).putExtra("sourceUrl", source.bookSourceUrl)
+            )
         }
     }
 
@@ -435,17 +569,25 @@ class BookSourceActivity :
                     else appDb.bookSourceDao.flowSearch(searchKey)
                 }
                 else -> appDb.bookSourceDao.flowSearch(searchKey)
+            }.map { list ->
+                sortSources(list)
             }.catch {
                 AppLog.put("书源管理界面更新数据出错", it)
-            }.flowOn(IO).conflate().collect { list ->
-                sources = sortSources(list)
+            }.flowOn(IO).conflate().collect { sortedList ->
+                sources = sortedList
+                if (dedupeMode != BookSourceDedupeMode.NONE) {
+                    val needsRefresh = ruleScores.isEmpty() ||
+                        sortedList.any { it.bookSourceUrl !in ruleScores }
+                    if (needsRefresh) {
+                        refreshRuleScores()
+                    }
+                }
                 selectedUrls = selectedUrls.intersect(
-                    sources.mapTo(hashSetOf(), BookSourcePart::bookSourceUrl)
+                    sortedList.mapTo(hashSetOf(), BookSourcePart::bookSourceUrl)
                 )
                 if (viewMode == BookSourceViewMode.GROUP && query.isNotBlank()) {
-                    expandedSections = sourceGroupKeys(sources)
+                    expandedSections = sourceGroupKeys(sortedList)
                 }
-                delay(100)
             }
         }
     }
@@ -484,8 +626,37 @@ class BookSourceActivity :
         }
     }
 
+    private fun refreshRuleScores() {
+        if (dedupeMode == BookSourceDedupeMode.NONE) return
+        ruleScoresJob?.cancel()
+        ruleScoresJob = lifecycleScope.launch(IO) {
+            val scores = runCatching {
+                appDb.bookSourceDao.allRuleScores()
+                    .associate { it.bookSourceUrl to it.score }
+            }.getOrDefault(emptyMap())
+            if (scores.isNotEmpty()) {
+                BookSourceDedupe.updateCachedRuleScores(scores)
+            }
+            withContext(Main) {
+                ruleScores = scores
+            }
+        }
+    }
+
     private fun selectableSources(): List<BookSourcePart> {
-        return sources.distinctBy(BookSourcePart::bookSourceUrl)
+        if (dedupeMode == BookSourceDedupeMode.NONE) {
+            return sources.distinctBy(BookSourcePart::bookSourceUrl)
+        }
+        val tree = BookSourceDedupe.buildTree(sources, dedupeMode, ruleScores, preferredPrimaries)
+        return buildList(sources.size) {
+            tree.forEach { node ->
+                if (node.hasDuplicates && node.groupKey in expandedDedupeKeys) {
+                    addAll(node.allSources)
+                } else {
+                    add(node.primary)
+                }
+            }
+        }
     }
 
     private fun selectedSources(): List<BookSourcePart> = selectableSources().filter {
@@ -579,12 +750,19 @@ class BookSourceActivity :
         CheckSource.timeout = result.timeoutSeconds * 1000L
         CheckSource.wSourceComment = result.writeSourceComment
         CheckSource.checkDomain = result.checkDomain
+        CheckSource.syncSiteName = result.syncSiteName
         CheckSource.checkSearch = result.checkSearch
         CheckSource.checkDiscovery = result.checkDiscovery
         CheckSource.checkInfo = result.checkInfo
         CheckSource.checkCategory = result.checkCategory
         CheckSource.checkContent = result.checkContent
         CheckSource.blockSourceDialogs = result.blockSourceDialogs
+        CheckSource.textMinLength = result.textMinLength
+        CheckSource.checkImageReachable = result.checkImageReachable
+        CheckSource.imageSampleCount = result.imageSampleCount
+        CheckSource.checkAudioReachable = result.checkAudioReachable
+        CheckSource.checkVideoReachable = result.checkVideoReachable
+        CheckSource.checkFileDownloadReachable = result.checkFileDownloadReachable
         CheckSource.putConfig()
         CheckSource.start(this, selection)
         startActivity<BookSourceCheckActivity>()

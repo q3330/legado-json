@@ -74,6 +74,7 @@ object WebBook {
             coroutineContext = currentCoroutineContext()
         )
         val checkJs = bookSource.loginCheckJs
+        Debug.log(bookSource.bookSourceUrl, "≡请求地址:${analyzeUrl.url}")
         val res = kotlin.runCatching {
             analyzeUrl.getStrResponseAwait().let {
                 if (!checkJs.isNullOrBlank()) { //检测书源是否已登录
@@ -99,6 +100,12 @@ object WebBook {
             }
         }
         checkRedirect(bookSource, res)
+        if (Debug.isChecking && io.legado.app.model.CheckSource.syncSiteName) {
+            io.legado.app.help.source.SourceContentProbe.recordCheckedPageTitle(
+                bookSource.bookSourceUrl,
+                res.body,
+            )
+        }
         return BookList.analyzeBookList(
             bookSource = bookSource,
             ruleData = ruleData,
@@ -148,6 +155,7 @@ object WebBook {
             infoMap = exploreInfoMap
         )
         val checkJs = bookSource.loginCheckJs
+        Debug.log(bookSource.bookSourceUrl, "≡请求地址:${analyzeUrl.url}")
         val res = kotlin.runCatching {
             analyzeUrl.getStrResponseAwait().let {
                 if (!checkJs.isNullOrBlank()) { //检测书源是否已登录
@@ -173,6 +181,12 @@ object WebBook {
             }
         }
         checkRedirect(bookSource, res)
+        if (Debug.isChecking && io.legado.app.model.CheckSource.syncSiteName) {
+            io.legado.app.help.source.SourceContentProbe.recordCheckedPageTitle(
+                bookSource.bookSourceUrl,
+                res.body,
+            )
+        }
         return BookList.analyzeBookList(
             bookSource = bookSource,
             ruleData = ruleData,

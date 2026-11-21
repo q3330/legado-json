@@ -19,6 +19,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -28,6 +29,9 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.HorizontalDivider
@@ -82,7 +86,7 @@ import io.legado.app.R
 import io.legado.app.ui.design.theme.NgTheme
 import kotlin.math.roundToInt
 
-enum class NgMenuSelectionStyle { INDICATOR, TEXT_ONLY, COMPACT_CHECK }
+enum class NgMenuSelectionStyle { INDICATOR, TEXT_ONLY, COMPACT_CHECK, SWITCH }
 
 private val LeadingIconSlotSize = 20.dp
 private val CompactCheckSize = 14.dp
@@ -140,17 +144,20 @@ internal fun rememberNgExpandableActionMenuContentWidth(
                 .orEmpty()
         }
 
+        fun visualWeight(text: String): Int {
+            var weight = 0
+            for (i in text.indices) {
+                weight += if (text[i].code > 0x7F) 2 else 1
+            }
+            return weight
+        }
+
         fun groupWidthPx(group: List<NgExpandableActionMenuItem>): Float {
             if (group.isEmpty()) return 0f
             val reserveIconSpace = group.any {
                 it.iconRes != 0 || it.themedIconKind != null
             }
-            return group.maxOf { item ->
-                val textWidthPx = textMeasurer.measure(
-                    text = AnnotatedString(itemTitle(item)),
-                    style = textStyle,
-                    maxLines = 1,
-                ).size.width.toFloat()
+            fun fixedDpFor(item: NgExpandableActionMenuItem): Dp {
                 var fixedWidthDp = 24.dp
                 if (reserveIconSpace) fixedWidthDp += 30.dp
                 fixedWidthDp += when (item.selectionStyle) {
@@ -158,11 +165,34 @@ internal fun rememberNgExpandableActionMenuContentWidth(
                     NgMenuSelectionStyle.TEXT_ONLY -> 0.dp
                     // Allow for separate pixel rounding of the compact row's slots.
                     NgMenuSelectionStyle.COMPACT_CHECK -> CompactCheckSpacing + CompactCheckSize + 2.dp
+                    NgMenuSelectionStyle.SWITCH -> 46.dp
                 }
                 if (item.children.isNotEmpty() || item.navigation) fixedWidthDp += 30.dp
-                val rowWidthPx = textWidthPx + with(density) { fixedWidthDp.toPx() }
-                maxOf(rowWidthPx, groupWidthPx(item.children))
+                return fixedWidthDp
             }
+            // 大量分组时仅对最宽候选执行文本测量，避免在主线程连续测量数百个文本项。
+            val candidates = if (group.size > 16) {
+                group.sortedByDescending { item ->
+                    val title = itemTitle(item)
+                    visualWeight(title) * 8 + with(density) { fixedDpFor(item).value.roundToInt() }
+                }.take(12)
+            } else {
+                group
+            }
+            var maxWidthPx = candidates.maxOf { item ->
+                val textWidthPx = textMeasurer.measure(
+                    text = AnnotatedString(itemTitle(item)),
+                    style = textStyle,
+                    maxLines = 1,
+                ).size.width.toFloat()
+                textWidthPx + with(density) { fixedDpFor(item).toPx() }
+            }
+            for (item in group) {
+                if (item.children.isNotEmpty()) {
+                    maxWidthPx = maxOf(maxWidthPx, groupWidthPx(item.children))
+                }
+            }
+            return maxWidthPx
         }
 
         with(density) { groupWidthPx(items).toDp() }
@@ -761,20 +791,16 @@ private fun NgSideSlideExpandableActionMenu(
                     tonalElevation = 0.dp,
                     shadowElevation = NgTheme.effects.overlayElevationDp.dp
                 ) {
-                    Column(
+                    NgExpandableActionMenuLazyRows(
+                        items = items,
+                        expandedItemIds = expandedItemIds,
+                        onToggle = onToggle,
+                        onItemClick = onItemClick,
+                        rowMinHeight = rowMinHeight,
                         modifier = Modifier
-                            .heightIn(max = maxHeight)
-                            .verticalScroll(rememberScrollState())
-                            .padding(vertical = 4.dp)
-                    ) {
-                        NgExpandableActionMenuRows(
-                            items = items,
-                            expandedItemIds = expandedItemIds,
-                            onToggle = onToggle,
-                            onItemClick = onItemClick,
-                            rowMinHeight = rowMinHeight
-                        )
-                    }
+                            .fillMaxWidth()
+                            .heightIn(max = maxHeight),
+                    )
                 }
                 Spacer(
                     modifier = Modifier
@@ -940,6 +966,84 @@ private class NgBottomPointerShape(
     }
 }
 
+private data class NgFlattenedActionMenuRow(
+    val key: Long,
+    val item: NgExpandableActionMenuItem,
+    val reserveIconSpace: Boolean,
+)
+
+private fun flattenActionMenuRows(
+    items: List<NgExpandableActionMenuItem>,
+    expandedItemIds: Set<Int>,
+    seenCounts: HashMap<Int, Int>,
+    out: MutableList<NgFlattenedActionMenuRow>,
+) {
+    val reserveIconSpace = items.any { it.iconRes != 0 || it.themedIconKind != null }
+    for (item in items) {
+        val occ = seenCounts[item.itemId] ?: 0
+        seenCounts[item.itemId] = occ + 1
+        val uniqueKey = (item.itemId.toLong() shl 20) or occ.toLong()
+        out.add(NgFlattenedActionMenuRow(uniqueKey, item, reserveIconSpace))
+        if (item.enabled && item.itemId in expandedItemIds && item.children.isNotEmpty()) {
+            flattenActionMenuRows(item.children, expandedItemIds, seenCounts, out)
+        }
+    }
+}
+
+@Composable
+private fun NgExpandableActionMenuLazyRows(
+    items: List<NgExpandableActionMenuItem>,
+    expandedItemIds: Set<Int>,
+    onToggle: (Int) -> Unit,
+    onItemClick: (NgExpandableActionMenuItem) -> Unit,
+    rowMinHeight: Dp,
+    modifier: Modifier = Modifier,
+) {
+    val visibleRows = remember(items, expandedItemIds) {
+        buildList(items.size) {
+            flattenActionMenuRows(items, expandedItemIds, HashMap(items.size), this)
+        }
+    }
+    val listState = rememberLazyListState()
+    LazyColumn(
+        state = listState,
+        modifier = modifier,
+        contentPadding = PaddingValues(vertical = 4.dp),
+    ) {
+        items(
+            items = visibleRows,
+            key = { it.key },
+            contentType = { if (it.item.dividerBefore) 1 else 0 },
+        ) { row ->
+            val item = row.item
+            val isExpanded = item.enabled && item.itemId in expandedItemIds
+            Column {
+                if (item.dividerBefore) {
+                    HorizontalDivider(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 3.dp),
+                        color = Color(NgTheme.colors.outlineVariant).copy(
+                            alpha = if (NgTheme.snapshot.isEInk) 1f else 0.35f
+                        )
+                    )
+                }
+                NgExpandableActionMenuRow(
+                    item = item,
+                    isExpanded = isExpanded,
+                    reserveIconSpace = row.reserveIconSpace,
+                    rowMinHeight = rowMinHeight,
+                    onClick = {
+                        if (item.children.isEmpty()) {
+                            onItemClick(item)
+                        } else {
+                            onToggle(item.itemId)
+                        }
+                    }
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun NgExpandableActionMenuRows(
     items: List<NgExpandableActionMenuItem>,
@@ -1052,7 +1156,15 @@ private fun NgExpandableActionMenuRow(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
         )
-        if (compactCheck) {
+        if (item.selectionStyle == NgMenuSelectionStyle.SWITCH) {
+            Spacer(Modifier.width(8.dp))
+            NgSwitchControl(
+                checked = item.checked,
+                onCheckedChange = { if (item.enabled) onClick() },
+                enabled = item.enabled,
+                variant = NgSwitchControlVariant.COMPACT,
+            )
+        } else if (compactCheck) {
             Spacer(Modifier.width(CompactCheckSpacing))
             Box(Modifier.size(CompactCheckSize)) {
                 if (item.checked) {

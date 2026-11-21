@@ -20,6 +20,37 @@ import kotlinx.coroutines.flow.map
 @Dao
 interface BookSourceDao {
 
+    data class BookSourceRuleScore(
+        val bookSourceUrl: String,
+        val score: Int,
+    )
+
+    data class BookSourceGroupEntry(
+        val bookSourceUrl: String,
+        val bookSourceGroup: String?,
+    )
+
+    data class BookSourceR18ScanEntry(
+        val bookSourceUrl: String,
+        val bookSourceName: String,
+        val bookSourceGroup: String?,
+        val bookSourceComment: String?,
+        val exploreUrl: String?,
+        val searchUrl: String?,
+    )
+
+    @Query(
+        """select bookSourceUrl,
+        (case when length(searchUrl) > 0 or length(mainJs) > 0 then 2 else 0 end) +
+        (case when length(exploreUrl) > 0 then 2 else 0 end) +
+        (case when length(ruleToc) > 4 then 2 else 0 end) +
+        (case when length(ruleContent) > 4 then 2 else 0 end) +
+        (case when length(ruleBookInfo) > 4 then 1 else 0 end) +
+        (case when length(mainJs) > 0 then 4 else 0 end) as score
+        from book_sources"""
+    )
+    fun allRuleScores(): List<BookSourceRuleScore>
+
     @Query("select * from book_sources_part order by customOrder asc")
     fun flowAll(): Flow<List<BookSourcePart>>
 
@@ -127,6 +158,15 @@ interface BookSourceDao {
         order by customOrder asc"""
     )
     fun flowGroupExplore(key: String): Flow<List<BookSourcePart>>
+
+    @Query(
+        """select * from book_sources_part
+        where enabledExplore = 1
+        and hasExploreUrl = 1
+        and bookSourceType = :type
+        order by customOrder asc"""
+    )
+    fun flowTypeExplore(type: Int): Flow<List<BookSourcePart>>
 
     @Query("select distinct bookSourceGroup from book_sources where trim(bookSourceGroup) <> ''")
     fun flowGroupsUnProcessed(): Flow<List<String>>
@@ -299,6 +339,12 @@ interface BookSourceDao {
     @Query("delete from book_sources where bookSourceUrl in (:keys)")
     fun deleteByKeys(keys: List<String>)
 
+    @Query("select bookSourceUrl from book_sources")
+    fun allKeys(): List<String>
+
+    @Query("delete from book_sources")
+    fun deleteAll()
+
     fun deleteByKeysChunked(keys: Collection<String>) {
         keys.chunked(900).forEach(::deleteByKeys)
     }
@@ -320,23 +366,89 @@ interface BookSourceDao {
     )
     val hasDuplicateOrder: Boolean
 
+    @Query(
+        """select bookSourceUrl, bookSourceGroup from book_sources
+        where bookSourceGroup like '%' || :group || '%'"""
+    )
+    fun getGroupEntriesByGroup(group: String): List<BookSourceGroupEntry>
+
+    @Query(
+        """select bookSourceUrl, bookSourceName, bookSourceGroup, bookSourceComment, exploreUrl, searchUrl
+        from book_sources
+        where bookSourceUrl in (:keys)"""
+    )
+    fun getR18ScanEntriesByKeys(keys: List<String>): List<BookSourceR18ScanEntry>
+
+    @Query(
+        """select bookSourceUrl, bookSourceGroup from book_sources
+        where bookSourceGroup = :group
+            or bookSourceGroup like :group || ',%'
+            or bookSourceGroup like '%,' || :group
+            or bookSourceGroup like '%,' || :group || ',%'"""
+    )
+    fun getExactGroupEntriesByGroup(group: String): List<BookSourceGroupEntry>
+
+    @Query(
+        """update book_sources
+        set bookSourceGroup = :group
+        where bookSourceGroup is null or trim(bookSourceGroup) = '' or bookSourceGroup like '%未分组%'"""
+    )
+    fun assignGroupToNoGroup(group: String)
+
     @Query("update book_sources set enabled = :enable where bookSourceUrl = :bookSourceUrl")
     fun enable(bookSourceUrl: String, enable: Boolean)
 
+    @Query("update book_sources set enabled = :enable where bookSourceUrl in (:keys)")
+    fun enableByKeys(enable: Boolean, keys: List<String>)
+
     @Transaction
     fun enable(enable: Boolean, bookSources: List<BookSourcePart>) {
-        for (bs in bookSources) {
-            enable(bs.bookSourceUrl, enable)
+        val urls = bookSources
+            .asSequence()
+            .filter { it.enabled != enable }
+            .map { it.bookSourceUrl }
+            .distinct()
+            .toList()
+        if (urls.isEmpty()) return
+        urls.chunked(900).forEach { chunk ->
+            enableByKeys(enable, chunk)
         }
     }
 
     @Query("update book_sources set enabledExplore = :enable where bookSourceUrl = :bookSourceUrl")
     fun enableExplore(bookSourceUrl: String, enable: Boolean)
 
+    @Query("update book_sources set enabledExplore = :enable where bookSourceUrl in (:keys)")
+    fun enableExploreByKeys(enable: Boolean, keys: List<String>)
+
     @Transaction
     fun enableExplore(enable: Boolean, bookSources: List<BookSourcePart>) {
-        for (bs in bookSources) {
-            enableExplore(bs.bookSourceUrl, enable)
+        val urls = bookSources
+            .asSequence()
+            .filter { it.enabledExplore != enable }
+            .map { it.bookSourceUrl }
+            .distinct()
+            .toList()
+        if (urls.isEmpty()) return
+        urls.chunked(900).forEach { chunk ->
+            enableExploreByKeys(enable, chunk)
+        }
+    }
+
+    @Query("update book_sources set bookSourceType = :bookSourceType where bookSourceUrl in (:keys)")
+    fun upTypeByKeys(bookSourceType: Int, keys: List<String>)
+
+    @Transaction
+    fun upType(bookSourceType: Int, bookSources: List<BookSourcePart>) {
+        val urlsToUpdate = bookSources
+            .asSequence()
+            .filter { it.bookSourceType != bookSourceType }
+            .map { it.bookSourceUrl }
+            .distinct()
+            .toList()
+        if (urlsToUpdate.isEmpty()) return
+        urlsToUpdate.chunked(900).forEach { chunk ->
+            upTypeByKeys(bookSourceType, chunk)
         }
     }
 
@@ -363,11 +475,32 @@ interface BookSourceDao {
     )
     fun upGroup(bookSourceUrl: String, bookSourceGroup: String)
 
+    @Query(
+        """update book_sources
+        set bookSourceGroup = :bookSourceGroup where bookSourceUrl in (:keys)"""
+    )
+    fun upGroupByKeys(bookSourceGroup: String, keys: List<String>)
+
+    @Transaction
+    fun upGroupBatch(updates: Map<String, List<String>>) {
+        updates.forEach { (newGroup, urls) ->
+            if (urls.isNotEmpty()) {
+                urls.chunked(900).forEach { chunk ->
+                    upGroupByKeys(newGroup, chunk)
+                }
+            }
+        }
+    }
+
     @Transaction
     fun upGroup(bookSources: List<BookSourcePart>) {
+        if (bookSources.isEmpty()) return
+        val grouped = LinkedHashMap<String, MutableList<String>>()
         for (bs in bookSources) {
-            bs.bookSourceGroup?.let { upGroup(bs.bookSourceUrl, it) }
+            val newGroup = bs.bookSourceGroup ?: continue
+            grouped.getOrPut(newGroup) { arrayListOf() }.add(bs.bookSourceUrl)
         }
+        upGroupBatch(grouped)
     }
 
     private fun dealGroups(list: List<String>): List<String> {

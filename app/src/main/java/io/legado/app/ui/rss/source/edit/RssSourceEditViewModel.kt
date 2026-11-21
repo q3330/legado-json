@@ -13,13 +13,16 @@ import io.legado.app.help.http.CookieStore
 import io.legado.app.help.source.removeSortCache
 import io.legado.app.help.source.deleteSourceVariables
 import io.legado.app.model.SharedJsScope
+import io.legado.app.utils.FileUtils
 import io.legado.app.utils.GSON
 import io.legado.app.utils.fromJsonObject
 import io.legado.app.utils.getClipText
+import io.legado.app.utils.normalizeFileName
 import io.legado.app.utils.printOnDebug
 import io.legado.app.utils.stackTraceStr
 import io.legado.app.utils.toastOnUi
 import kotlinx.coroutines.Dispatchers
+import java.io.File
 
 
 class RssSourceEditViewModel(application: Application) : BaseViewModel(application) {
@@ -119,6 +122,22 @@ class RssSourceEditViewModel(application: Application) : BaseViewModel(applicati
             return RuleComplete.autoComplete(rule, preRule, type)
         }
         return rule
+    }
+
+    fun saveToFile(source: RssSource, success: (file: File, name: String) -> Unit) {
+        execute {
+            val baseName = source.sourceName.trim().ifBlank { "rssSource" }.normalizeFileName()
+            val name = "rssSource_${baseName}.json"
+            val path = "${context.filesDir}/shareRssSource.json"
+            FileUtils.delete(path)
+            val file = FileUtils.createFileWithReplace(path)
+            file.writeText(GSON.toJson(listOf(source)))
+            Pair(file, name)
+        }.onSuccess {
+            success(it.first, it.second)
+        }.onError {
+            context.toastOnUi(it.stackTraceStr)
+        }
     }
 
 }

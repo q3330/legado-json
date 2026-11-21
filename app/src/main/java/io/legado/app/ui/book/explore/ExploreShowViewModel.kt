@@ -9,9 +9,13 @@ import io.legado.app.data.appDb
 import io.legado.app.data.entities.BookSource
 import io.legado.app.data.entities.SearchBook
 import io.legado.app.help.book.isNotShelf
+import io.legado.app.help.source.BookSourceReachabilityStore
 import io.legado.app.help.source.clearExploreKindsCache
 import io.legado.app.help.source.exploreKinds
 import io.legado.app.help.source.isOpenableExploreCategory
+import io.legado.app.help.translate.BookTitleTranslator
+import io.legado.app.help.translate.TranslateConfig
+import io.legado.app.help.translate.TranslateHistoryStore
 import io.legado.app.model.webBook.WebBook
 import io.legado.app.utils.printOnDebug
 import io.legado.app.utils.stackTraceStr
@@ -35,6 +39,8 @@ internal data class ExploreShowUiState(
     val kinds: List<io.legado.app.data.entities.rule.ExploreKind> = emptyList(),
     val selectedKind: io.legado.app.data.entities.rule.ExploreKind? = null,
     val books: List<SearchBook> = emptyList(),
+    val translatedNames: Map<String, String> = emptyMap(),
+    val autoTranslateEnabled: Boolean = TranslateConfig.enabled,
     val bookPages: Map<String, Int> = emptyMap(),
     val bookshelfKeys: Set<String> = emptySet(),
     val isKindsLoading: Boolean = true,
@@ -66,6 +72,7 @@ class ExploreShowViewModel(application: Application) : BaseViewModel(application
 
     private var initialized = false
     private var contentJob: Job? = null
+    private var translateJob: Job? = null
     private var contentRequestId = 0L
     private data class FailedPage(val page: Int, val placement: Placement, val kindUrl: String)
     private var failedPage: FailedPage? = null
@@ -116,6 +123,9 @@ class ExploreShowViewModel(application: Application) : BaseViewModel(application
             }
             val kinds = source.exploreKinds()
             val errorKind = kinds.firstOrNull { it.title.startsWith("ERROR:") }
+            if (errorKind != null) {
+                BookSourceReachabilityStore.markUnreachable(source.bookSourceUrl)
+            }
             val selectedKind = initialExploreUrl?.takeIf { it.isNotBlank() }?.let { url ->
                 kinds.firstOrNull { it.url == url }
                     ?: io.legado.app.data.entities.rule.ExploreKind(
@@ -169,6 +179,9 @@ class ExploreShowViewModel(application: Application) : BaseViewModel(application
             source.clearExploreKindsCache()
             val kinds = source.exploreKinds()
             val errorKind = kinds.firstOrNull { it.title.startsWith("ERROR:") }
+            if (errorKind != null) {
+                BookSourceReachabilityStore.markUnreachable(source.bookSourceUrl)
+            }
             val current = _uiState.value.selectedKind
             val selected = current?.url?.let { url -> kinds.firstOrNull { it.url == url } }
                 ?: kinds.firstOrNull { it.isOpenableExploreCategory() }
@@ -295,6 +308,49 @@ class ExploreShowViewModel(application: Application) : BaseViewModel(application
         jumpToPage(page)
     }
 
+    fun toggleAutoTranslate() {
+        val next = !TranslateConfig.enabled
+        TranslateConfig.enabled = next
+        _uiState.update { it.copy(autoTranslateEnabled = next) }
+        if (next) {
+            translateBooks(_uiState.value.books)
+        } else {
+            translateJob?.cancel()
+        }
+    }
+
+    private fun translateBooks(books: List<SearchBook>) {
+        if (!TranslateConfig.enabled || books.isEmpty()) return
+        val cached = buildMap {
+            books.forEach { book ->
+                BookTitleTranslator.getCached(book.name)?.let { put(book.name, it) }
+            }
+        }
+        if (cached.isNotEmpty()) {
+            _uiState.update { it.copy(translatedNames = it.translatedNames + cached) }
+        }
+        val namesToTranslate = books.map { it.name }.distinct().filter {
+            it !in cached && BookTitleTranslator.needsTranslation(it)
+        }
+        if (namesToTranslate.isEmpty()) return
+        translateJob?.cancel()
+        translateJob = viewModelScope.launch(IO) {
+            val translated = BookTitleTranslator.translateBatch(namesToTranslate)
+            if (translated.isNotEmpty()) {
+                books.forEach { book ->
+                    translated[book.name]?.let { translatedTitle ->
+                        TranslateHistoryStore.recordBookTitle(
+                            bookKey = book.bookUrl,
+                            originalTitle = book.name,
+                            translatedTitle = translatedTitle,
+                        )
+                    }
+                }
+                _uiState.update { it.copy(translatedNames = it.translatedNames + translated) }
+            }
+        }
+    }
+
     fun jumpToPage(page: Int) {
         if (page <= 0 || _uiState.value.selectedKind == null) return
         // Keep the accepted page until the requested page proves it has content.
@@ -382,10 +438,15 @@ class ExploreShowViewModel(application: Application) : BaseViewModel(application
                         } else it.selectionRevision
                     )
                 }
+                if (searchBooks.isNotEmpty()) {
+                    BookSourceReachabilityStore.markReachable(source.bookSourceUrl)
+                }
                 appDb.searchBookDao.insert(*searchBooks.toTypedArray())
+                translateBooks(merged)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
+                BookSourceReachabilityStore.markUnreachable(source.bookSourceUrl)
                 e.printOnDebug()
                 if (requestId == contentRequestId) {
                     failedPage = FailedPage(page, placement, url)

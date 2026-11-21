@@ -22,8 +22,10 @@ import io.legado.app.data.entities.KeyboardAssist
 import io.legado.app.data.entities.RssSource
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.config.LocalConfig
+import io.legado.app.help.source.SourceContentProbe
 import io.legado.app.ui.about.AppLogDialog
 import io.legado.app.ui.about.NetworkLogDialog
+import io.legado.app.ui.book.source.edit.BookSourceFetchSiteNameDialog
 import io.legado.app.ui.code.CodeEditActivity
 import io.legado.app.ui.source.edit.SourceEditorHost
 import io.legado.app.ui.login.SourceLoginActivity
@@ -34,6 +36,7 @@ import io.legado.app.ui.source.edit.SourceEditCodeHighlighter
 import io.legado.app.ui.widget.dialog.UrlOptionDialog
 import io.legado.app.ui.widget.dialog.VariableDialog
 import io.legado.app.ui.widget.keyboard.KeyboardAssistsConfig
+import io.legado.app.utils.CreateFileContract
 import io.legado.app.utils.GSON
 import io.legado.app.utils.SelectFileContract
 import io.legado.app.utils.isContentScheme
@@ -78,7 +81,12 @@ class RssSourceEditActivity :
     private var pendingInsert: RssEditorSelection? = null
     private var editingFieldKey: String? = null
     private var pendingExit by mutableStateOf(false)
+    private var fetchSiteNameDialogVisible by mutableStateOf(false)
     private var forceFinish = false
+
+    private val exportResult = registerForActivityResult(CreateFileContract()) {
+        it.save(this, this) { toastOnUi(R.string.export_success) }
+    }
 
     private val selectDoc = registerForActivityResult(SelectFileContract()) { uri ->
         val target = pendingInsert
@@ -136,6 +144,25 @@ class RssSourceEditActivity :
                         }
                     )
                 }
+                if (fetchSiteNameDialogVisible) {
+                    BookSourceFetchSiteNameDialog(
+                        initialUrl = fieldValue("sourceUrl"),
+                        onDismiss = { fetchSiteNameDialogVisible = false },
+                        onFetchName = { targetUrl ->
+                            withContext(IO) {
+                                val headers = runCatching { source.getHeaderMap(false) }.getOrDefault(emptyMap())
+                                SourceContentProbe.fetchWebsiteTitle(targetUrl, headers)
+                            }
+                        },
+                        onWriteName = { siteName ->
+                            replaceFieldValue(
+                                "sourceName",
+                                RssEditorSnapshot(siteName, siteName.length, siteName.length)
+                            )
+                            fetchSiteNameDialogVisible = false
+                        },
+                    )
+                }
             }
         }
         viewModel.initData(intent) {
@@ -186,6 +213,12 @@ class RssSourceEditActivity :
             RssSourceEditAction.ClearCookie -> viewModel.clearCookie(source.sourceUrl)
             RssSourceEditAction.Copy -> sendToClip(GSON.toJson(normalizedSource()))
             RssSourceEditAction.Paste -> viewModel.pasteSource(::replaceSource)
+            RssSourceEditAction.FetchSiteName -> fetchSiteNameDialogVisible = true
+            RssSourceEditAction.SaveLocal -> {
+                viewModel.saveToFile(normalizedSource()) { file, name ->
+                    exportResult.launch(CreateFileContract.FileData(name, file, "application/json"))
+                }
+            }
             RssSourceEditAction.ImportQr -> qrCodeResult.launch()
             RssSourceEditAction.ShareText -> share(GSON.toJson(normalizedSource()))
             RssSourceEditAction.ShareQr -> shareWithQr(

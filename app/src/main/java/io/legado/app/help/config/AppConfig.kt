@@ -569,6 +569,12 @@ object AppConfig : SharedPreferences.OnSharedPreferenceChangeListener {
             appCtx.putPrefInt(PreferKey.exploreShowLayoutMode, value.coerceIn(0, 1))
         }
 
+    var bookSourceDedupeMode: Int
+        get() = appCtx.getPrefInt(PreferKey.bookSourceDedupeMode, 0).coerceIn(0, 2)
+        set(value) {
+            appCtx.putPrefInt(PreferKey.bookSourceDedupeMode, value.coerceIn(0, 2))
+        }
+
     val showRSS: Boolean
         get() = appCtx.getPrefBoolean(PreferKey.showRss, true)
 

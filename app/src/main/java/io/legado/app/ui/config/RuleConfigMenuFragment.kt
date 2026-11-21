@@ -7,6 +7,7 @@ import androidx.compose.ui.platform.ViewCompositionStrategy
 import io.legado.app.R
 import io.legado.app.base.BaseFragment
 import io.legado.app.ui.book.toc.rule.TxtTocRuleActivity
+import io.legado.app.ui.config.translate.TranslateConfigActivity
 import io.legado.app.ui.design.theme.NgAppTheme
 import io.legado.app.ui.dict.rule.DictRuleActivity
 import io.legado.app.ui.replace.ReplaceRuleActivity
@@ -25,7 +26,8 @@ class RuleConfigMenuFragment : BaseFragment(R.layout.fragment_rule_config_menu) 
                     RuleConfigMenuScreen(
                         onOpenTxtTocRules = { startActivity<TxtTocRuleActivity>() },
                         onOpenReplaceRules = { startActivity<ReplaceRuleActivity>() },
-                        onOpenDictRules = { startActivity<DictRuleActivity>() }
+                        onOpenDictRules = { startActivity<DictRuleActivity>() },
+                        onOpenTranslateConfig = { startActivity<TranslateConfigActivity>() },
                     )
                 }
             }

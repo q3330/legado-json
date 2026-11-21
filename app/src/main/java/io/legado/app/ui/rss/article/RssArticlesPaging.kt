@@ -15,7 +15,8 @@ internal data class RssArticlesLoadState(
     val refreshing: Boolean = false,
     val loadingMore: Boolean = false,
     val hasMore: Boolean = false,
-    val error: String? = null
+    val error: String? = null,
+    val page: Int = 1,
 )
 
 internal data class RssArticlesQuery(
@@ -68,6 +69,15 @@ internal class RssArticlesPaging(
         start(RssArticlesRequest(snapshot, snapshot.sortUrl, 1, true, now()))
     }
 
+    fun jumpToPage(query: RssArticlesQuery, targetPage: Int) {
+        val safePage = targetPage.coerceAtLeast(1)
+        val snapshot = query.copy(source = query.source.copy())
+        this.query = snapshot
+        nextPageUrl = null
+        failedRequest = null
+        start(RssArticlesRequest(snapshot, snapshot.sortUrl, safePage, true, now()))
+    }
+
     fun loadMore(query: RssArticlesQuery) {
         val activeQuery = this.query
         if (activeQuery == null || !activeQuery.sameLocation(query)) {
@@ -77,7 +87,7 @@ internal class RssArticlesPaging(
         if (state.refreshing || state.loadingMore || state.error != null || !state.hasMore) return
         val url = nextPageUrl
         if (url.isNullOrBlank()) {
-            updateState(RssArticlesLoadState())
+            updateState(RssArticlesLoadState(page = page.coerceAtLeast(1)))
             return
         }
         start(RssArticlesRequest(activeQuery, url, page + 1, false, order))
@@ -102,7 +112,8 @@ internal class RssArticlesPaging(
             RssArticlesLoadState(
                 refreshing = request.refreshing,
                 loadingMore = !request.refreshing,
-                hasMore = !request.refreshing && state.hasMore
+                hasMore = !request.refreshing && state.hasMore,
+                page = request.page.coerceAtLeast(1),
             )
         )
         requestJob = scope.launch(start = CoroutineStart.UNDISPATCHED) {
@@ -122,7 +133,8 @@ internal class RssArticlesPaging(
                 updateState(
                     RssArticlesLoadState(
                         hasMore = articles.isNotEmpty() && stored.addedCount > 0 &&
-                                !nextUrl.isNullOrBlank()
+                                !nextUrl.isNullOrBlank(),
+                        page = request.page.coerceAtLeast(1),
                     )
                 )
             } catch (error: Exception) {

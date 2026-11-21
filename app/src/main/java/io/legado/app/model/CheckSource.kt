@@ -15,6 +15,7 @@ object CheckSource {
     var timeout = CacheManager.getLong("checkSourceTimeout") ?: 180000L
     var wSourceComment = CacheManager.get("wSourceComment")?.toBoolean() ?: true
     var checkDomain = CacheManager.get("checkDomain")?.toBoolean() ?: false
+    var syncSiteName = CacheManager.get("checkSourceSyncSiteName")?.toBoolean() ?: false
     var checkSearch = CacheManager.get("checkSearch")?.toBoolean() ?: true
     var checkDiscovery = CacheManager.get("checkDiscovery")?.toBoolean() ?: true
     var checkInfo = CacheManager.get("checkInfo")?.toBoolean() ?: true
@@ -22,6 +23,16 @@ object CheckSource {
     var checkContent = CacheManager.get("checkContent")?.toBoolean() ?: true
     var blockSourceDialogs =
         CacheManager.get("checkSourceBlockDialogs")?.toBoolean() ?: true
+    var textMinLength = CacheManager.getInt("checkSourceTextMinLength") ?: 50
+    var checkImageReachable =
+        CacheManager.get("checkSourceImageReachable")?.toBoolean() ?: true
+    var imageSampleCount = CacheManager.getInt("checkSourceImageSampleCount") ?: 2
+    var checkAudioReachable =
+        CacheManager.get("checkSourceAudioReachable")?.toBoolean() ?: true
+    var checkVideoReachable =
+        CacheManager.get("checkSourceVideoReachable")?.toBoolean() ?: true
+    var checkFileDownloadReachable =
+        CacheManager.get("checkSourceFileDownloadReachable")?.toBoolean() ?: true
 
     fun start(context: Context, sources: List<BookSourcePart>) {
         CheckSourceTaskStore.begin(sources)
@@ -51,12 +62,19 @@ object CheckSource {
         CacheManager.put("checkSourceTimeout", timeout)
         CacheManager.put("wSourceComment", wSourceComment)
         CacheManager.put("checkDomain", checkDomain)
+        CacheManager.put("checkSourceSyncSiteName", syncSiteName)
         CacheManager.put("checkSearch", checkSearch)
         CacheManager.put("checkDiscovery", checkDiscovery)
         CacheManager.put("checkInfo", checkInfo)
         CacheManager.put("checkCategory", checkCategory)
         CacheManager.put("checkContent", checkContent)
         CacheManager.put("checkSourceBlockDialogs", blockSourceDialogs)
+        CacheManager.put("checkSourceTextMinLength", textMinLength)
+        CacheManager.put("checkSourceImageReachable", checkImageReachable)
+        CacheManager.put("checkSourceImageSampleCount", imageSampleCount)
+        CacheManager.put("checkSourceAudioReachable", checkAudioReachable)
+        CacheManager.put("checkSourceVideoReachable", checkVideoReachable)
+        CacheManager.put("checkSourceFileDownloadReachable", checkFileDownloadReachable)
     }
 
 }

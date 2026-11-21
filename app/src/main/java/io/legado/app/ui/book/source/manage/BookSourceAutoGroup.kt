@@ -6,6 +6,7 @@ internal enum class BookSourceAutoGroupRuleType {
     SOURCE_CATEGORY,
     DEBUG_FEATURES,
     URL_CATEGORY,
+    R18_DETECTION,
 }
 
 internal object BookSourceAutoGroup {

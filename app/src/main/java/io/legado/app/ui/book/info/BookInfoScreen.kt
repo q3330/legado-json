@@ -79,6 +79,7 @@ import io.legado.app.data.entities.SearchBook
 import io.legado.app.help.book.isEpub
 import io.legado.app.help.book.isLocal
 import io.legado.app.help.book.menuCapabilities
+import io.legado.app.ui.book.explore.ExploreToolbarButton
 import io.legado.app.ui.book.search.SearchResultCard
 import io.legado.app.ui.design.components.NgButtonVariant
 import io.legado.app.ui.design.components.NgDialogVariant
@@ -87,10 +88,13 @@ import io.legado.app.ui.design.components.compose.NgActionBarButtonSurfaceVarian
 import io.legado.app.ui.design.components.compose.NgBookCover
 import io.legado.app.ui.design.components.compose.NgButton
 import io.legado.app.ui.design.components.compose.NgDialog
+import io.legado.app.ui.design.components.compose.NgDialogTextActionButton
 import io.legado.app.ui.design.components.compose.NgExpandableActionMenu
 import io.legado.app.ui.design.components.compose.NgExpandableActionMenuItem
 import io.legado.app.ui.design.components.compose.NgExpandableActionMenuVariant
 import io.legado.app.ui.design.components.compose.NgExpandableActionMenuWidthVariant
+import io.legado.app.ui.design.components.compose.NgFormDensity
+import io.legado.app.ui.design.components.compose.NgFormSwitchRow
 import io.legado.app.ui.design.components.compose.NgGlassDefaults
 import io.legado.app.ui.design.components.compose.NgGlassSurface
 import io.legado.app.ui.design.components.compose.NgMaterialRole
@@ -107,6 +111,9 @@ internal enum class BookInfoIntroRenderMode {
 
 internal data class BookInfoUiState(
     val book: Book? = null,
+    val displayBookName: String? = null,
+    val originalNameText: String? = null,
+    val bookTranslateEnabled: Boolean = true,
     val coverRevision: Int = 0,
     val originText: String = "",
     val latestText: String = "",
@@ -211,6 +218,7 @@ internal sealed interface BookInfoUiEvent {
     data object Back : BookInfoUiEvent
     data object Refresh : BookInfoUiEvent
     data object CustomButton : BookInfoUiEvent
+    data object TranslateClick : BookInfoUiEvent
     data class Menu(val action: BookInfoMenuAction) : BookInfoUiEvent
     data object CoverClick : BookInfoUiEvent
     data object CoverLongClick : BookInfoUiEvent
@@ -221,6 +229,7 @@ internal sealed interface BookInfoUiEvent {
     data class TagClick(val tag: String) : BookInfoUiEvent
     data class TagLongClick(val tag: String) : BookInfoUiEvent
     data object OriginClick : BookInfoUiEvent
+    data object OriginalNameClick : BookInfoUiEvent
     data object ChangeSource : BookInfoUiEvent
     data object ChangeGroup : BookInfoUiEvent
     data object OpenToc : BookInfoUiEvent
@@ -442,6 +451,24 @@ private fun BookInfoTopBar(
                 onClick = { onEvent(BookInfoUiEvent.CustomButton) },
             )
         }
+        ExploreToolbarButton(
+            iconRes = R.drawable.ic_translate,
+            description = stringResource(R.string.explore_auto_translate),
+            tint = if (state.bookTranslateEnabled) {
+                Color(NgTheme.colors.primary)
+            } else {
+                colorResource(R.color.ng_search_icon)
+            },
+            onClick = { onEvent(BookInfoUiEvent.TranslateClick) },
+            modifier = Modifier.background(
+                if (state.bookTranslateEnabled) {
+                    Color(NgTheme.colors.primary).copy(alpha = 0.13f)
+                } else {
+                    Color.Transparent
+                },
+                RoundedCornerShape(10.dp),
+            ),
+        )
         BookInfoMoreMenu(state = state, onEvent = onEvent)
     }
 }
@@ -613,10 +640,9 @@ private fun BookInfoHeroCard(
             Spacer(Modifier.width(16.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = book.name,
+                    text = state.displayBookName?.takeIf { it.isNotBlank() } ?: book.name,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .then(if (landscape) Modifier else Modifier.basicMarquee())
                         .combinedClickable(
                             onClick = { onEvent(BookInfoUiEvent.NameClick) },
                             onLongClick = { onEvent(BookInfoUiEvent.NameLongClick) },
@@ -625,8 +651,8 @@ private fun BookInfoHeroCard(
                     fontSize = if (landscape) 18.sp else 17.sp,
                     lineHeight = if (landscape) 24.sp else 22.sp,
                     fontWeight = FontWeight.Bold,
-                    maxLines = if (landscape) 2 else 1,
-                    overflow = if (landscape) TextOverflow.Ellipsis else TextOverflow.Clip,
+                    maxLines = 4,
+                    overflow = TextOverflow.Ellipsis,
                 )
                 Text(
                     text = book.getRealAuthor(),
@@ -714,6 +740,13 @@ private fun BookInfoMetaRows(
         trailingDescription = stringResource(R.string.change_origin),
         onTrailingClick = { onEvent(BookInfoUiEvent.ChangeSource) },
     )
+    state.originalNameText?.takeIf { it.isNotBlank() }?.let { originalName ->
+        BookInfoMetaRow(
+            iconRes = R.drawable.ic_translate,
+            text = originalName,
+            onClick = { onEvent(BookInfoUiEvent.OriginalNameClick) },
+        )
+    }
     BookInfoMetaRow(iconRes = R.drawable.ic_book_last, text = state.latestText)
     BookInfoMetaRow(
         iconRes = R.drawable.ic_groups,

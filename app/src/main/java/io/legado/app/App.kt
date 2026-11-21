@@ -56,7 +56,6 @@ import io.legado.app.help.storage.Backup
 import io.legado.app.help.tts.packages.MicrosoftOfflineProcess
 import io.legado.app.model.BookCover
 import io.legado.app.quickjs.QuickJsSandboxProcess
-import io.legado.app.service.McpService
 import io.legado.app.utils.ChineseUtils
 import io.legado.app.utils.LogUtils
 import io.legado.app.utils.defaultSharedPreferences
@@ -95,9 +94,6 @@ class App : Application() {
             //预下载Cronet so
             Cronet.preDownload()
             createNotificationChannels()
-            if (BuildConfig.DEBUG) {
-                McpService.start(this@App)
-            }
             LiveEventBus.config()
                 .lifecycleObserverAlwaysActive(true)
                 .autoClear(false)

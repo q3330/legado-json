@@ -256,11 +256,12 @@ fun NgSearchBarActionButton(
     modifier: Modifier = Modifier,
     icon: Painter = painterResource(R.drawable.ic_grid_menu),
     enabled: Boolean = true,
+    tint: Color? = null,
 ) {
     val cornerRadius = 10.dp
     val shape = RoundedCornerShape(cornerRadius)
     val containerColor = colorResource(R.color.ng_search_surface)
-    val contentColor = colorResource(R.color.ng_search_icon)
+    val contentColor = tint ?: colorResource(R.color.ng_search_icon)
     val surfaceStyle = rememberNgSearchSurfaceStyle(
         containerColor = containerColor,
         strokeColor = Color.Transparent,

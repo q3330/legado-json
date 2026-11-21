@@ -86,6 +86,33 @@ class BookSourceCacheStore(
             clear(listOf(sourceUrl), appDb.cacheDao.allKeys())
         }
 
+        fun clearAll(cacheKeys: Collection<String>) {
+            val storagePrefix = "book_source_cache_"
+            val registryPrefix = "book_source_cache_registry_"
+            if (cacheKeys.any { it.startsWith(registryPrefix) }) {
+                val registryValues = appDb.cacheDao
+                    .getByPrefix(registryPrefix)
+                    .mapNotNull { it.value }
+                if (registryValues.isNotEmpty()) {
+                    appDb.cacheDao.deleteByKeysChunked(registryValues.distinct())
+                    registryValues.forEach(CacheManager::deleteMemory)
+                    val globalFileCache = ACache.get()
+                    registryValues.forEach(globalFileCache::remove)
+                }
+            }
+            if (cacheKeys.any { it.startsWith(storagePrefix) }) {
+                appDb.cacheDao.deleteByPrefix(storagePrefix)
+            }
+            CacheManager.deleteMemoryWhere { it.startsWith(storagePrefix) }
+            val rootCacheDir = File(appCtx.cacheDir, "bookSourceCache")
+            if (rootCacheDir.exists()) {
+                rootCacheDir.listFiles()?.forEach { dir ->
+                    if (dir.isDirectory) ACache.get(dir).clear()
+                    else dir.delete()
+                }
+            }
+        }
+
         fun clear(sourceUrls: Collection<String>, cacheKeys: Collection<String>) {
             if (sourceUrls.isEmpty()) return
             val rootCacheDir = File(appCtx.cacheDir, "bookSourceCache")

@@ -18,7 +18,8 @@ import io.legado.app.ui.design.components.compose.NgSettingsItem
 internal fun RuleConfigMenuScreen(
     onOpenTxtTocRules: () -> Unit,
     onOpenReplaceRules: () -> Unit,
-    onOpenDictRules: () -> Unit
+    onOpenDictRules: () -> Unit,
+    onOpenTranslateConfig: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -43,6 +44,12 @@ internal fun RuleConfigMenuScreen(
                 summary = stringResource(R.string.config_dict_rule),
                 iconRes = R.drawable.ic_translate,
                 onClick = onOpenDictRules
+            )
+            RuleConfigMenuEntry(
+                title = stringResource(R.string.translate_api),
+                summary = stringResource(R.string.translate_api_desc),
+                iconRes = R.drawable.ic_translate,
+                onClick = onOpenTranslateConfig
             )
         }
     }

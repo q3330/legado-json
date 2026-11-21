@@ -223,10 +223,6 @@ private fun ColumnScope.SourceGroupManageContent(
     onEdit: (String) -> Unit,
     onDelete: (String) -> Unit,
 ) {
-    var deleteTarget by rememberSaveable { mutableStateOf<String?>(null) }
-    LaunchedEffect(groups, deleteTarget) {
-        if (deleteTarget != null && deleteTarget !in groups) deleteTarget = null
-    }
     NgLongDrawerHeader(
         title = stringResource(R.string.group_manage),
         actionIconRes = R.drawable.ic_add,
@@ -266,40 +262,12 @@ private fun ColumnScope.SourceGroupManageContent(
                         SourceGroupManageRow(
                             group = group,
                             onEdit = { onEdit(group) },
-                            onDelete = { deleteTarget = group },
+                            onDelete = { onDelete(group) },
                             showDivider = index != groups.lastIndex,
                         )
                     }
                 }
             }
-        }
-    }
-    if (deleteTarget != null) {
-        Spacer(Modifier.height(10.dp))
-        Text(
-            text = stringResource(R.string.sure_del_any, deleteTarget.orEmpty()),
-            modifier = Modifier.padding(horizontal = 4.dp, vertical = 6.dp),
-            color = Color(NgTheme.colors.error),
-            fontSize = 14.sp,
-            lineHeight = 18.sp,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-        )
-        NgFormActionRow {
-            NgFormActionButton(
-                text = stringResource(R.string.cancel),
-                onClick = { deleteTarget = null },
-                modifier = Modifier.weight(1f),
-            )
-            NgFormActionButton(
-                text = stringResource(R.string.delete),
-                onClick = {
-                    deleteTarget?.let(onDelete)
-                    deleteTarget = null
-                },
-                modifier = Modifier.weight(1f),
-                variant = NgButtonVariant.DANGER,
-            )
         }
     }
 }

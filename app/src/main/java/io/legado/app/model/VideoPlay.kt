@@ -34,6 +34,7 @@ import io.legado.app.help.gsyVideo.ExoVideoManager.Companion.FULLSCREEN_ID
 import io.legado.app.help.gsyVideo.FloatingPlayer
 import io.legado.app.help.gsyVideo.VideoPlaybackTarget
 import io.legado.app.help.gsyVideo.VideoPlayer
+import io.legado.app.help.source.SourceInteractionPolicy
 import io.legado.app.model.analyzeRule.AnalyzeUrl
 import io.legado.app.model.rss.Rss
 import io.legado.app.model.webBook.WebBook
@@ -273,19 +274,24 @@ object VideoPlay : CoroutineScope by MainScope(){
             appCtx.toastOnUi("未找到章节")
             return
         }
-        WebBook.getContent(loadScope, source as BookSource, book, chapter)
-            .onSuccess(IO) { content ->
-                val content = content.trim()
-                val mUrl = if (content.isEmpty()) {
-                    throw ContentEmptyException("正文为空")
-                } else if (content.startsWith("<")) { //当作mpd文本
-                    val name = MD5Utils.md5Encode(content) + ".mpd"
-                    val file = FileUtils.createFileIfNotExist(videoTempFile,name)
-                    file.writeText(content)
-                    Uri.fromFile(file).toString()
-                } else {
-                    content
-                }
+        val interactionPolicy = SourceInteractionPolicy(
+            blockDialogs = false,
+            blockMediaLaunches = true,
+            throwOnBlocked = false,
+            blockBrowserOnly = true,
+        )
+        WebBook.getContent(
+            scope = loadScope,
+            bookSource = source as BookSource,
+            book = book,
+            bookChapter = chapter,
+            context = IO + interactionPolicy,
+        )
+            .onSuccess(IO) { rawContent ->
+                val mUrl = resolvePlayableVideoUrl(
+                    rawContent = rawContent,
+                    capturedBrowserUrl = interactionPolicy.blockedRequest?.url,
+                )
                 videoUrl = mUrl
                 val analyzeUrl = AnalyzeUrl(
                     mUrl,
@@ -310,6 +316,55 @@ object VideoPlay : CoroutineScope by MainScope(){
                 AppLog.put("获取资源链接出错\n$it", it, true)
             }
         isLoading = false
+    }
+
+    private val urlExtractRegex = Regex("""https?://[^\s"'<>]+""", RegexOption.IGNORE_CASE)
+    private val directMediaUrlRegex = Regex(
+        """\.(m3u8|mp4|flv|mkv|webm|mov|ts|mpd)(\?|$)|/(get_file|video|media|stream|hls)/""",
+        RegexOption.IGNORE_CASE,
+    )
+
+    private fun resolvePlayableVideoUrl(
+        rawContent: String,
+        capturedBrowserUrl: String?,
+    ): String {
+        val content = rawContent.trim()
+        val captured = capturedBrowserUrl?.trim().orEmpty()
+        if (content.startsWith("<")) { // 当作 mpd 文本
+            val name = MD5Utils.md5Encode(content) + ".mpd"
+            val file = FileUtils.createFileIfNotExist(videoTempFile, name)
+            file.writeText(content)
+            return Uri.fromFile(file).toString()
+        }
+        // 标准视频源：本身就是单行直链（可带 Legado URL 参数 ,{...}）
+        if (content.isNotEmpty() && !content.contains('\n') && !content.contains('\r') &&
+            (content.startsWith("http://", true) ||
+                content.startsWith("https://", true) ||
+                content.startsWith("file://", true) ||
+                content.startsWith("rtmp://", true) ||
+                content.startsWith("rtsp://", true))
+        ) {
+            return content
+        }
+        // 兼容旧版视频书源：正文混杂提示文案 + 直链，或通过 java.startBrowser(url, ...) 传入直链
+        val extractedUrls = buildList {
+            urlExtractRegex.findAll(content).forEach { match ->
+                val cleaned = match.value.trimEnd(',', ';', ')', ']', '}', '。', '，')
+                if (cleaned.isNotEmpty()) add(cleaned)
+            }
+            if (captured.startsWith("http://", true) || captured.startsWith("https://", true)) {
+                add(captured)
+            }
+        }.distinct()
+        val preferred = extractedUrls.firstOrNull { directMediaUrlRegex.containsMatchIn(it) }
+            ?: extractedUrls.firstOrNull()
+        if (!preferred.isNullOrBlank()) {
+            return preferred
+        }
+        if (content.isNotEmpty()) {
+            return content
+        }
+        throw ContentEmptyException("正文为空")
     }
 
     /**
