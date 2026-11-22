@@ -79,7 +79,6 @@ import io.legado.app.data.entities.SearchBook
 import io.legado.app.help.book.isEpub
 import io.legado.app.help.book.isLocal
 import io.legado.app.help.book.menuCapabilities
-import io.legado.app.ui.book.explore.ExploreToolbarButton
 import io.legado.app.ui.book.search.SearchResultCard
 import io.legado.app.ui.design.components.NgButtonVariant
 import io.legado.app.ui.design.components.NgDialogVariant
@@ -99,6 +98,7 @@ import io.legado.app.ui.design.components.compose.NgGlassDefaults
 import io.legado.app.ui.design.components.compose.NgGlassSurface
 import io.legado.app.ui.design.components.compose.NgMaterialRole
 import io.legado.app.ui.design.components.compose.NgPullRefreshBox
+import io.legado.app.ui.design.components.compose.NgToolbarTranslateButton
 import io.legado.app.ui.design.components.compose.NgVisualIconButton
 import io.legado.app.ui.design.components.compose.NgWindowLiquidGlassBackdropHost
 import io.legado.app.ui.design.theme.NgTheme
@@ -113,7 +113,7 @@ internal data class BookInfoUiState(
     val book: Book? = null,
     val displayBookName: String? = null,
     val originalNameText: String? = null,
-    val bookTranslateEnabled: Boolean = true,
+    val isTranslating: Boolean = false,
     val coverRevision: Int = 0,
     val originText: String = "",
     val latestText: String = "",
@@ -452,23 +452,12 @@ private fun BookInfoTopBar(
                 onClick = { onEvent(BookInfoUiEvent.CustomButton) },
             )
         }
-        ExploreToolbarButton(
-            iconRes = R.drawable.ic_translate,
-            description = stringResource(R.string.explore_auto_translate),
-            tint = if (state.bookTranslateEnabled) {
-                Color(NgTheme.colors.primary)
-            } else {
-                colorResource(R.color.ng_search_icon)
-            },
+        NgToolbarTranslateButton(
+            isTranslating = state.isTranslating,
             onClick = { onEvent(BookInfoUiEvent.TranslateClick) },
-            modifier = Modifier.background(
-                if (state.bookTranslateEnabled) {
-                    Color(NgTheme.colors.primary).copy(alpha = 0.13f)
-                } else {
-                    Color.Transparent
-                },
-                RoundedCornerShape(10.dp),
-            ),
+            contentDescription = "翻译书籍信息",
+            idleTint = colorResource(R.color.ng_search_icon),
+            borderColor = colorResource(R.color.primaryText),
         )
         BookInfoMoreMenu(state = state, onEvent = onEvent)
     }

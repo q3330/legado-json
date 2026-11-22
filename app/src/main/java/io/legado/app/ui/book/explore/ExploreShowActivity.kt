@@ -59,7 +59,7 @@ class ExploreShowActivity :
                     layoutMode = layoutMode,
                     onBack = ::finish,
                     onRefresh = viewModel::refresh,
-                    onToggleAutoTranslate = viewModel::toggleAutoTranslate,
+                    onTranslateBooks = viewModel::translateCurrentBooksOnce,
                     onRefreshKinds = viewModel::reloadKinds,
                     onSelectKind = viewModel::selectKind,
                     onLayoutModeChange = ::updateLayoutMode,
@@ -68,7 +68,8 @@ class ExploreShowActivity :
                     onLoadNext = viewModel::loadNextPage,
                     onRetryContent = viewModel::retryContent,
                     onOpenBook = ::showBookInfo,
-                    onShowError = { showDialogFragment(TextDialog("ERROR", it)) }
+                    onShowError = { showDialogFragment(TextDialog("ERROR", it)) },
+                    onCurrentPageChanged = viewModel::onCurrentPageChanged,
                 )
                 pagePickerPage?.let { currentPage ->
                     ExplorePageJumpDialog(

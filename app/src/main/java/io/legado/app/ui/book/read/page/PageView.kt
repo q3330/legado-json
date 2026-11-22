@@ -514,7 +514,11 @@ class PageView(context: Context) : FrameLayout(context) {
      */
     @SuppressLint("SetTextI18n")
     fun setProgress(textPage: TextPage) = textPage.apply {
-        tvBookName?.setTextIfNotEqual(ReadBook.book?.name)
+        tvBookName?.setTextIfNotEqual(
+            ReadBook.book?.let {
+                io.legado.app.help.translate.BookTitleTranslator.resolveBookDisplayName(it.bookUrl, it.name)
+            }
+        )
         tvTitle?.setTextIfNotEqual(textPage.title)
         val readProgress = readProgress
         tvTotalProgress?.setTextIfNotEqual(readProgress)

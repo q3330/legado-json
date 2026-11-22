@@ -141,6 +141,8 @@ class BooksFragment() : BaseFragment(0),
     private var upLastUpdateTimeJob: Job? = null
     private var refreshAllowed by mutableStateOf(true)
     private var onlyUpdateRead = false
+
+    internal fun currentBooks(): List<Book> = bookItems
     private var actionBook: Book? = null
     private var tocBook: Book? = null
     private var exportBook: Book? = null

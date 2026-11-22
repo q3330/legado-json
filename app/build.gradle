@@ -78,6 +78,13 @@ android {
             abiFilters "arm64-v8a"
         }
 
+        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_STL=c++_static"
+                abiFilters "arm64-v8a"
+            }
+        }
+
         buildConfigField "String", "Cronet_Version", "\"$CronetVersion\""
         buildConfigField "String", "Cronet_Main_Version", "\"$CronetMainVersion\""
 
@@ -89,6 +96,11 @@ android {
                         "room.schemaLocation"  : "$projectDir/schemas".toString()
                 ]
             }
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path file("src/main/cpp/CMakeLists.txt")
         }
     }
     buildFeatures {
@@ -335,6 +347,10 @@ dependencies {
 
     //转换繁体
     implementation(libs.quick.chinese.transfer.core)
+
+    // 端侧离线翻译（开源 NMT ONNX Runtime + Google ML Kit 独立 SDK）
+    implementation(libs.onnxruntime.android)
+    implementation(libs.mlkit.translate)
 
     //加解密类库,有些书源使用
     //noinspection GradleDependency,GradlePackageUpdate

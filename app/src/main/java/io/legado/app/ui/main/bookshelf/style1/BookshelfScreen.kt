@@ -15,6 +15,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -30,8 +33,12 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import io.legado.app.R
+import io.legado.app.data.entities.Book
 import io.legado.app.help.config.BookshelfFloatingDockSearchPosition
 import io.legado.app.help.config.BookshelfTopBarStyle
+import io.legado.app.help.translate.BookTitleTranslator
+import io.legado.app.help.translate.TranslateConfig
+import io.legado.app.help.translate.TranslateHistoryStore
 import io.legado.app.ui.design.components.compose.NgExpandableActionMenu
 import io.legado.app.ui.design.components.compose.NgExpandableActionMenuItem
 import io.legado.app.ui.design.components.compose.NgExpandableActionMenuVariant
@@ -39,6 +46,7 @@ import io.legado.app.ui.design.components.compose.NgMenuSelectionStyle
 import io.legado.app.ui.design.components.compose.NgPopupToggleState
 import io.legado.app.ui.design.components.compose.NgSearchBar
 import io.legado.app.ui.design.components.compose.NgSearchBarActionButton
+import io.legado.app.ui.design.components.compose.NgSearchBarTranslateButton
 import io.legado.app.ui.design.components.compose.NgSearchBarVariant
 import io.legado.app.ui.design.components.compose.rememberNgExpandableActionMenuContentWidth
 import io.legado.app.ui.design.theme.NgTheme
@@ -61,6 +69,8 @@ internal fun BookshelfScreen(
     dockContentTopInsetPx: Int,
     dockTransparency: Int,
     dockSearchPosition: BookshelfFloatingDockSearchPosition,
+    isTranslating: Boolean = false,
+    onTranslateBooks: () -> Unit = {},
     onSearchClick: () -> Unit,
     onGroupClick: (Int) -> Unit,
     onGroupLongClick: (Int) -> Unit,
@@ -111,6 +121,8 @@ internal fun BookshelfScreen(
             groups = dockGroups,
             selectedGroupIndex = selectedGroupIndex,
             groupGridMode = groupGridMode,
+            isTranslating = isTranslating,
+            onTranslateBooks = onTranslateBooks,
             onSearchClick = onSearchClick,
             onGroupClick = onGroupClick,
             onOpenSortMenu = onOpenSortMenu,
@@ -126,6 +138,8 @@ private fun BookshelfModernTopBar(
     groups: List<BookshelfDockGroup>,
     selectedGroupIndex: Int,
     groupGridMode: Boolean,
+    isTranslating: Boolean = false,
+    onTranslateBooks: () -> Unit = {},
     onSearchClick: () -> Unit,
     onGroupClick: (Int) -> Unit,
     onOpenSortMenu: () -> List<NgExpandableActionMenuItem>,
@@ -163,6 +177,12 @@ private fun BookshelfModernTopBar(
                 variant = NgSearchBarVariant.TOOLBAR,
             )
         }
+        Spacer(Modifier.width(spacerWidth))
+        NgSearchBarTranslateButton(
+            isTranslating = isTranslating,
+            onClick = onTranslateBooks,
+            contentDescription = "翻译当前列表书名",
+        )
         if (!groupGridMode && groups.isNotEmpty()) {
             Spacer(Modifier.width(spacerWidth))
             BookshelfGroupMenuButton(
@@ -240,5 +260,22 @@ private fun BookshelfGroupMenuButton(
                 }
             },
         )
+    }
+}
+
+/** Resolve bookshelf display titles from saved translation records and cache only (never auto-runs inference). */
+@Composable
+internal fun rememberBookshelfBookDisplayNames(
+    books: List<Book>,
+): (Book) -> String {
+    val translateRevision by TranslateConfig.revision.collectAsState()
+    val cacheRevision by BookTitleTranslator.cacheRevision.collectAsState()
+    val historyBooks by TranslateHistoryStore.booksFlow.collectAsState()
+    val targetLang = remember(translateRevision) { TranslateConfig.targetLang }
+
+    return remember(targetLang, cacheRevision, historyBooks, books) {
+        { book: Book ->
+            BookTitleTranslator.resolveBookDisplayName(book.bookUrl, book.name, targetLang)
+        }
     }
 }

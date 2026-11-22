@@ -37,6 +37,7 @@ import io.legado.app.help.translate.TranslateConfig
 import io.legado.app.help.translate.TranslateHistoryStore
 import io.legado.app.lib.dialogs.alert
 import io.legado.app.lib.theme.transparentNavBar
+import io.legado.app.model.jsSource.isJsSource
 import io.legado.app.model.webBook.WebBook
 import io.legado.app.ui.book.explore.ExploreShowActivity
 import io.legado.app.ui.book.info.BookInfoActivity
@@ -74,6 +75,26 @@ import kotlinx.coroutines.withTimeout
 private const val PREF_EXPLORE_MODERN_STYLE = "exploreModernStyle"
 private const val PREF_EXPLORE_MODERN_GRID = "exploreModernBookGrid"
 private const val PREF_EXPLORE_MODERN_SOURCE = "exploreModernSourceUrl"
+private val JS_SEARCH_FUNC_REGEX = Regex(
+    """(?:function\s+search\b|(?<!\.)\bsearch\s*\([^)]*\)\s*\{|\bsearch\s*[:=]\s*(?:async\s+)?(?:function\b|\())"""
+)
+
+private fun BookSource.supportsModernSearch(): Boolean {
+    if (isJsSource()) {
+        val js = mainJs.orEmpty()
+        return !searchUrl.isNullOrBlank() || JS_SEARCH_FUNC_REGEX.containsMatchIn(js)
+    }
+    if (searchUrl.isNullOrBlank()) return false
+    val rule = ruleSearch
+    val hasSearchRule = rule != null && (
+        !rule.bookList.isNullOrBlank() ||
+            !rule.name.isNullOrBlank() ||
+            !rule.bookUrl.isNullOrBlank()
+        )
+    val hasDirectBookInfoRule = !bookUrlPattern.isNullOrBlank() &&
+        !ruleBookInfo?.name.isNullOrBlank()
+    return hasSearchRule || hasDirectBookInfoRule
+}
 
 /**
  * 发现界面
@@ -111,7 +132,13 @@ class ExploreFragment() : Fragment(), MainFragmentInterface {
     private var modernTranslateJob: Job? = null
     private var modernFullSource: BookSource? = null
     private var modernRequestId = 0L
-    private data class ModernFailedPage(val page: Int, val reset: Boolean, val kindUrl: String)
+    private var modernCurrentPage = 1
+    private data class ModernFailedPage(
+        val page: Int,
+        val reset: Boolean,
+        val kindUrl: String,
+        val searchQuery: String? = null,
+    )
     private var modernFailedPage: ModernFailedPage? = null
     private var appliedDedupeMode: Int = AppConfig.bookSourceDedupeMode
     private val kindJobs = mutableMapOf<String, Job>()
@@ -124,7 +151,6 @@ class ExploreFragment() : Fragment(), MainFragmentInterface {
         modernStyle = requireContext().getPrefBoolean(PREF_EXPLORE_MODERN_STYLE, false)
         modernState = modernState.copy(
             layoutMode = io.legado.app.ui.book.explore.ExploreShowLayoutMode.from(AppConfig.exploreShowLayoutMode),
-            autoTranslateEnabled = TranslateConfig.enabled,
         )
         composeView = ComposeView(requireContext()).apply {
             setViewCompositionStrategy(
@@ -156,9 +182,15 @@ class ExploreFragment() : Fragment(), MainFragmentInterface {
                         onModernLoadMore = ::loadMoreModernBooks,
                         onModernJumpToPage = ::jumpToModernPage,
                         onModernRetryContent = ::retryModernContent,
-                        onModernToggleAutoTranslate = ::toggleModernAutoTranslate,
+                        onModernTranslateBooks = ::translateModernBooksOnce,
                         onModernLayoutModeChange = ::setModernLayoutMode,
                         onModernOpenBook = ::openBookInfo,
+                        onModernSearchQueryChange = ::updateModernSearchInput,
+                        onModernSearchSubmit = ::submitModernSearch,
+                        onModernExitSearch = ::exitModernSearch,
+                        onModernCurrentPageChange = { page ->
+                            if (page > 0) modernCurrentPage = page
+                        },
                         onQueryChange = { query ->
                             searchQuery = query
                             if (query.isNotBlank()) {
@@ -224,8 +256,10 @@ class ExploreFragment() : Fragment(), MainFragmentInterface {
         val next = !modernStyle
         modernStyle = next
         requireContext().putPrefBoolean(PREF_EXPLORE_MODERN_STYLE, next)
+        if (searchQuery.isNotBlank()) {
+            upExploreData()
+        }
         if (next) {
-            modernState = modernState.copy(autoTranslateEnabled = TranslateConfig.enabled)
             ensureModernSourceSelected(sources, forceReload = false)
         }
     }
@@ -236,14 +270,93 @@ class ExploreFragment() : Fragment(), MainFragmentInterface {
         AppConfig.exploreShowLayoutMode = mode.value
     }
 
-    private fun toggleModernAutoTranslate() {
-        val next = !TranslateConfig.enabled
-        TranslateConfig.enabled = next
-        modernState = modernState.copy(autoTranslateEnabled = next)
-        if (next) {
-            translateModernBooks(modernState.books)
-        } else {
+    private fun translateModernBooksOnce() {
+        if (modernTranslateJob?.isActive == true) {
             modernTranslateJob?.cancel()
+            modernTranslateJob = null
+            modernState = modernState.copy(isTranslating = false)
+            return
+        }
+        val books = modernState.books
+        if (books.isEmpty()) return
+        applyCachedModernBookTitles(books)
+        val stateSnapshot = modernState
+        val namesToTranslate = BookTitleTranslator.selectExplorePageBatchToTranslate(
+            books = books,
+            bookPages = stateSnapshot.bookPages,
+            currentPage = modernCurrentPage,
+            firstLoadedPage = stateSnapshot.firstLoadedPage,
+            translatedNames = stateSnapshot.translatedNames,
+        )
+        if (namesToTranslate.isEmpty()) {
+            toastOnUi("当前页书名已全部翻译")
+            return
+        }
+        modernState = modernState.copy(isTranslating = true)
+        modernTranslateJob = viewLifecycleOwner.lifecycleScope.launch(IO) {
+            try {
+                BookTitleTranslator.withTranslationSession {
+                    namesToTranslate.chunked(BookTitleTranslator.EXPLORE_TRANSLATE_STEP_SIZE).forEach { batch ->
+                        val translated = BookTitleTranslator.translateBatch(batch) { origin, dst ->
+                            if (dst.isNotBlank() && dst != origin) {
+                                modernState.books.forEach { book ->
+                                    if (book.name == origin) {
+                                        TranslateHistoryStore.recordBookTitle(
+                                            bookKey = book.bookUrl,
+                                            originalTitle = book.name,
+                                            translatedTitle = dst,
+                                        )
+                                    }
+                                }
+                                kotlinx.coroutines.runBlocking(kotlinx.coroutines.Dispatchers.Main.immediate) {
+                                    if (modernState.translatedNames[origin] != dst) {
+                                        modernState = modernState.copy(
+                                            translatedNames = modernState.translatedNames + (origin to dst),
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        if (translated.isNotEmpty()) {
+                            modernState.books.forEach { book ->
+                                translated[book.name]?.let { translatedTitle ->
+                                    TranslateHistoryStore.recordBookTitle(
+                                        bookKey = book.bookUrl,
+                                        originalTitle = book.name,
+                                        translatedTitle = translatedTitle,
+                                    )
+                                }
+                            }
+                            withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                modernState = modernState.copy(
+                                    translatedNames = modernState.translatedNames + translated,
+                                )
+                            }
+                        }
+                    }
+                }
+            } finally {
+                withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    modernState = modernState.copy(isTranslating = false)
+                }
+            }
+        }
+    }
+
+    private fun applyCachedModernBookTitles(books: List<SearchBook>) {
+        if (books.isEmpty()) return
+        val cachedByName = buildMap {
+            books.forEach { book ->
+                val resolved = BookTitleTranslator.resolveBookDisplayName(book.bookUrl, book.name)
+                if (resolved != book.name) {
+                    put(book.name, resolved)
+                }
+            }
+        }
+        if (cachedByName.isNotEmpty()) {
+            modernState = modernState.copy(
+                translatedNames = modernState.translatedNames + cachedByName,
+            )
         }
     }
 
@@ -295,7 +408,7 @@ class ExploreFragment() : Fragment(), MainFragmentInterface {
     private fun upExploreData() {
         if (!this::composeView.isInitialized) return
         exploreFlowJob?.cancel()
-        val sourceName = searchQuery.trim()
+        val sourceName = if (modernStyle) "" else searchQuery.trim()
         val group = selectedGroup
         val type = selectedType
         val dedupeMode = BookSourceDedupeMode.from(AppConfig.bookSourceDedupeMode)
@@ -364,6 +477,10 @@ class ExploreFragment() : Fragment(), MainFragmentInterface {
                 isContentLoading = false,
                 kindsError = null,
                 contentError = null,
+                canSearch = false,
+                searchInput = "",
+                activeSearchQuery = "",
+                isSearchMode = false,
             )
             return
         }
@@ -390,6 +507,7 @@ class ExploreFragment() : Fragment(), MainFragmentInterface {
         modernSourceJob?.cancel()
         modernBooksJob?.cancel()
         modernTranslateJob?.cancel()
+        modernRequestId++
         modernFailedPage = null
         modernFullSource = null
         modernState = modernState.copy(
@@ -403,6 +521,7 @@ class ExploreFragment() : Fragment(), MainFragmentInterface {
             firstLoadedPage = 1,
             lastLoadedPage = 0,
             selectionRevision = modernState.selectionRevision + 1,
+            isTranslating = false,
             isKindsLoading = true,
             isRefreshing = false,
             isContentLoading = false,
@@ -410,6 +529,10 @@ class ExploreFragment() : Fragment(), MainFragmentInterface {
             hasMore = true,
             kindsError = null,
             contentError = null,
+            canSearch = false,
+            searchInput = "",
+            activeSearchQuery = "",
+            isSearchMode = false,
         )
         modernSourceJob = viewLifecycleOwner.lifecycleScope.launch {
             try {
@@ -424,6 +547,12 @@ class ExploreFragment() : Fragment(), MainFragmentInterface {
                     return@launch
                 }
                 modernFullSource = fullSource
+                val canSearch = fullSource.supportsModernSearch()
+                modernState = modernState.copy(
+                    source = fullSource,
+                    sourceName = fullSource.bookSourceName,
+                    canSearch = canSearch,
+                )
                 val kinds = withContext(IO) { source.exploreKinds() }
                 kindsBySource[url] = kinds
                 val errorKind = kinds.firstOrNull { it.title.startsWith("ERROR:") }
@@ -435,6 +564,7 @@ class ExploreFragment() : Fragment(), MainFragmentInterface {
                         kinds = kinds,
                         isKindsLoading = false,
                         kindsError = errorKind.url.orEmpty().ifBlank { errorKind.title },
+                        canSearch = canSearch,
                     )
                     return@launch
                 }
@@ -447,6 +577,7 @@ class ExploreFragment() : Fragment(), MainFragmentInterface {
                     selectedKind = firstKind,
                     isKindsLoading = false,
                     kindsError = null,
+                    canSearch = canSearch,
                 )
                 if (firstKind != null && !firstKind.url.isNullOrBlank()) {
                     loadModernBooksPage(fullSource, firstKind.url!!, page = 1, reset = true)
@@ -502,6 +633,67 @@ class ExploreFragment() : Fragment(), MainFragmentInterface {
         }
     }
 
+    private fun updateModernSearchInput(input: String) {
+        modernState = modernState.copy(searchInput = input)
+    }
+
+    private fun exitModernSearch() {
+        modernBooksJob?.cancel()
+        modernTranslateJob?.cancel()
+        modernRequestId++
+        modernFailedPage = null
+        modernState = modernState.copy(
+            isSearchMode = false,
+            activeSearchQuery = "",
+            searchInput = "",
+            books = emptyList(),
+            bookPages = emptyMap(),
+            firstLoadedPage = 1,
+            lastLoadedPage = 0,
+            hasMore = true,
+            isTranslating = false,
+            isContentLoading = false,
+            contentError = null,
+            selectionRevision = modernState.selectionRevision + 1,
+        )
+        val fullSource = modernFullSource
+        val kindUrl = modernState.selectedKind?.url?.takeIf(String::isNotBlank)
+        if (fullSource != null && kindUrl != null) {
+            loadModernBooksPage(fullSource, kindUrl, page = 1, reset = true)
+        }
+    }
+
+    private fun submitModernSearch(rawQuery: String) {
+        val fullSource = modernFullSource ?: return
+        if (!fullSource.supportsModernSearch()) return
+        val keyword = rawQuery.trim()
+        if (keyword.isEmpty()) {
+            if (modernState.isSearchMode) {
+                exitModernSearch()
+            }
+            return
+        }
+        modernBooksJob?.cancel()
+        modernTranslateJob?.cancel()
+        modernRequestId++
+        modernFailedPage = null
+        modernState = modernState.copy(
+            searchInput = keyword,
+            activeSearchQuery = keyword,
+            isSearchMode = true,
+            books = emptyList(),
+            bookPages = emptyMap(),
+            firstLoadedPage = 1,
+            lastLoadedPage = 0,
+            hasMore = true,
+            isTranslating = false,
+            isContentLoading = false,
+            contentError = null,
+            selectionRevision = modernState.selectionRevision + 1,
+        )
+        loadModernSearchPage(fullSource, keyword, page = 1, reset = true)
+    }
+
     private fun selectModernKind(kind: ExploreKind) {
         if (!kind.isOpenableExploreCategory()) return
         val kindUrl = kind.url?.takeIf(String::isNotBlank) ?: return
@@ -510,6 +702,8 @@ class ExploreFragment() : Fragment(), MainFragmentInterface {
         modernRequestId++
         modernState = modernState.copy(
             selectedKind = kind,
+            isSearchMode = false,
+            activeSearchQuery = "",
             books = emptyList(),
             bookPages = emptyMap(),
             firstLoadedPage = 1,
@@ -524,6 +718,11 @@ class ExploreFragment() : Fragment(), MainFragmentInterface {
 
     private fun refreshModernContent() {
         val fullSource = modernFullSource
+        val activeSearch = modernState.activeSearchQuery.takeIf { modernState.isSearchMode && it.isNotBlank() }
+        if (fullSource != null && activeSearch != null) {
+            loadModernSearchPage(fullSource, activeSearch, page = 1, reset = true, isPullRefresh = true)
+            return
+        }
         val kindUrl = modernState.selectedKind?.url
         if (fullSource != null && !kindUrl.isNullOrBlank()) {
             loadModernBooksPage(fullSource, kindUrl, page = 1, reset = true, isPullRefresh = true)
@@ -538,9 +737,19 @@ class ExploreFragment() : Fragment(), MainFragmentInterface {
 
     private fun loadMoreModernBooks() {
         val fullSource = modernFullSource ?: return
-        val kindUrl = modernState.selectedKind?.url?.takeIf(String::isNotBlank) ?: return
         if (modernState.isContentLoading || modernState.isRefreshing || !modernState.hasMore) return
         val nextPage = (modernState.lastLoadedPage + 1).coerceAtLeast(1)
+        val activeSearch = modernState.activeSearchQuery.takeIf { modernState.isSearchMode && it.isNotBlank() }
+        if (activeSearch != null) {
+            loadModernSearchPage(
+                source = fullSource,
+                keyword = activeSearch,
+                page = nextPage,
+                reset = modernState.books.isEmpty(),
+            )
+            return
+        }
+        val kindUrl = modernState.selectedKind?.url?.takeIf(String::isNotBlank) ?: return
         loadModernBooksPage(
             source = fullSource,
             kindUrl = kindUrl,
@@ -552,21 +761,64 @@ class ExploreFragment() : Fragment(), MainFragmentInterface {
     private fun jumpToModernPage(page: Int) {
         if (page <= 0) return
         val fullSource = modernFullSource ?: return
-        val kindUrl = modernState.selectedKind?.url?.takeIf(String::isNotBlank) ?: return
         if (modernState.isContentLoading || modernState.isKindsLoading || modernState.isRefreshing) return
+        val activeSearch = modernState.activeSearchQuery.takeIf { modernState.isSearchMode && it.isNotBlank() }
+        if (activeSearch != null) {
+            loadModernSearchPage(fullSource, activeSearch, page = page, reset = true)
+            return
+        }
+        val kindUrl = modernState.selectedKind?.url?.takeIf(String::isNotBlank) ?: return
         loadModernBooksPage(fullSource, kindUrl, page = page, reset = true)
     }
 
     private fun retryModernContent() {
         val fullSource = modernFullSource ?: return
         val failed = modernFailedPage ?: return
-        if (modernState.isContentLoading || modernState.selectedKind?.url != failed.kindUrl) return
-        loadModernBooksPage(fullSource, failed.kindUrl, page = failed.page, reset = failed.reset)
+        if (modernState.isContentLoading) return
+        val searchKeyword = failed.searchQuery
+        if (searchKeyword != null) {
+            if (!modernState.isSearchMode || modernState.activeSearchQuery != searchKeyword) return
+            loadModernSearchPage(fullSource, searchKeyword, page = failed.page, reset = failed.reset)
+        } else {
+            if (modernState.isSearchMode || modernState.selectedKind?.url != failed.kindUrl) return
+            loadModernBooksPage(fullSource, failed.kindUrl, page = failed.page, reset = failed.reset)
+        }
     }
 
     private fun loadModernBooksPage(
         source: BookSource,
         kindUrl: String,
+        page: Int,
+        reset: Boolean,
+        isPullRefresh: Boolean = false,
+    ) = executeModernBooksRequest(
+        source = source,
+        kindUrl = kindUrl,
+        searchKeyword = null,
+        page = page,
+        reset = reset,
+        isPullRefresh = isPullRefresh,
+    )
+
+    private fun loadModernSearchPage(
+        source: BookSource,
+        keyword: String,
+        page: Int,
+        reset: Boolean,
+        isPullRefresh: Boolean = false,
+    ) = executeModernBooksRequest(
+        source = source,
+        kindUrl = "",
+        searchKeyword = keyword,
+        page = page,
+        reset = reset,
+        isPullRefresh = isPullRefresh,
+    )
+
+    private fun executeModernBooksRequest(
+        source: BookSource,
+        kindUrl: String,
+        searchKeyword: String?,
         page: Int,
         reset: Boolean,
         isPullRefresh: Boolean = false,
@@ -583,7 +835,11 @@ class ExploreFragment() : Fragment(), MainFragmentInterface {
             try {
                 val incoming = withContext(IO) {
                     withTimeout(45_000L) {
-                        WebBook.exploreBookAwait(source, kindUrl, page)
+                        if (searchKeyword != null) {
+                            WebBook.searchBookAwait(source, searchKeyword, page)
+                        } else {
+                            WebBook.exploreBookAwait(source, kindUrl, page)
+                        }
                     }
                 }
                 if (requestId != modernRequestId) return@launch
@@ -617,8 +873,8 @@ class ExploreFragment() : Fragment(), MainFragmentInterface {
                     contentError = null,
                     selectionRevision = if (reset) modernState.selectionRevision + 1 else modernState.selectionRevision,
                 )
-                if (TranslateConfig.enabled && merged.isNotEmpty()) {
-                    translateModernBooks(merged)
+                if (merged.isNotEmpty()) {
+                    applyCachedModernBookTitles(merged)
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -627,50 +883,12 @@ class ExploreFragment() : Fragment(), MainFragmentInterface {
                 if (reset) {
                     BookSourceReachabilityStore.markUnreachable(source.bookSourceUrl)
                 }
-                modernFailedPage = ModernFailedPage(page, reset, kindUrl)
+                modernFailedPage = ModernFailedPage(page, reset, kindUrl, searchKeyword)
                 modernState = modernState.copy(
                     isRefreshing = false,
                     isContentLoading = false,
                     contentError = e.localizedMessage ?: "加载失败",
                 )
-            }
-        }
-    }
-
-    private fun translateModernBooks(books: List<SearchBook>) {
-        if (!TranslateConfig.enabled || books.isEmpty()) return
-        val cachedByName = buildMap {
-            books.forEach { book ->
-                BookTitleTranslator.getCached(book.name)?.let { put(book.name, it) }
-            }
-        }
-        if (cachedByName.isNotEmpty()) {
-            modernState = modernState.copy(
-                translatedNames = modernState.translatedNames + cachedByName,
-            )
-        }
-        val namesToTranslate = books.map { it.name }.distinct().filter { name ->
-            name !in cachedByName && BookTitleTranslator.needsTranslation(name)
-        }
-        if (namesToTranslate.isEmpty()) return
-        modernTranslateJob?.cancel()
-        modernTranslateJob = viewLifecycleOwner.lifecycleScope.launch(IO) {
-            val translated = BookTitleTranslator.translateBatch(namesToTranslate)
-            if (translated.isNotEmpty()) {
-                books.forEach { book ->
-                    translated[book.name]?.let { translatedTitle ->
-                        TranslateHistoryStore.recordBookTitle(
-                            bookKey = book.bookUrl,
-                            originalTitle = book.name,
-                            translatedTitle = translatedTitle,
-                        )
-                    }
-                }
-                withContext(kotlinx.coroutines.Dispatchers.Main) {
-                    modernState = modernState.copy(
-                        translatedNames = modernState.translatedNames + translated,
-                    )
-                }
             }
         }
     }
@@ -835,13 +1053,31 @@ class ExploreFragment() : Fragment(), MainFragmentInterface {
         val persistedLayoutMode = io.legado.app.ui.book.explore.ExploreShowLayoutMode.from(
             AppConfig.exploreShowLayoutMode
         )
-        if (modernState.layoutMode != persistedLayoutMode ||
-            modernState.autoTranslateEnabled != TranslateConfig.enabled
-        ) {
+        if (modernState.layoutMode != persistedLayoutMode) {
             modernState = modernState.copy(
                 layoutMode = persistedLayoutMode,
-                autoTranslateEnabled = TranslateConfig.enabled,
             )
+        }
+        applyCachedModernBookTitles(modernState.books)
+        if (modernStyle && modernState.selectedSourceUrl != null) {
+            val targetUrl = modernState.selectedSourceUrl
+            viewLifecycleOwner.lifecycleScope.launch {
+                val refreshed = withContext(IO) {
+                    targetUrl?.let { appDb.bookSourceDao.getBookSource(it) }
+                }
+                if (refreshed != null && modernState.selectedSourceUrl == refreshed.bookSourceUrl) {
+                    modernFullSource = refreshed
+                    val nextCanSearch = refreshed.supportsModernSearch()
+                    modernState = modernState.copy(
+                        source = refreshed,
+                        sourceName = refreshed.bookSourceName,
+                        canSearch = nextCanSearch,
+                    )
+                    if (!nextCanSearch && modernState.isSearchMode) {
+                        exitModernSearch()
+                    }
+                }
+            }
         }
         val currentDedupeMode = AppConfig.bookSourceDedupeMode
         if (currentDedupeMode != appliedDedupeMode) {

@@ -63,8 +63,11 @@ import com.google.gson.GsonBuilder
 import io.legado.app.R
 import io.legado.app.base.BaseActivity
 import io.legado.app.base.ComposeActivityBinding
-import io.legado.app.data.appDb
 import io.legado.app.help.translate.BookTitleTranslator
+import io.legado.app.help.translate.LocalHyMtModelManager
+import io.legado.app.help.translate.LocalHyMtModelSpec
+import io.legado.app.help.translate.LocalNmtModelManager
+import io.legado.app.help.translate.LocalNmtModelSpec
 import io.legado.app.help.translate.TranslateConfig
 import io.legado.app.help.translate.TranslateEngineItem
 import io.legado.app.help.translate.TranslateHistoryStore
@@ -97,16 +100,19 @@ import io.legado.app.ui.design.components.compose.NgPopupToggleState
 import io.legado.app.ui.design.components.compose.NgSwitchControl
 import io.legado.app.ui.design.theme.NgAppTheme
 import io.legado.app.ui.design.theme.NgTheme
+import io.legado.app.utils.SelectFileContract
 import io.legado.app.utils.getClipText
 import io.legado.app.utils.sendToClip
 import io.legado.app.utils.toastOnUi
 import io.legado.app.utils.viewbindingdelegate.viewBinding
+import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers.IO
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private const val MENU_ADD_ENGINE = 0x58000001
 private const val MENU_RESET_ENGINES = 0x58000002
+private const val MENU_RESET_COOLDOWN = 0x58000004
 
 private val prettyGson by lazy {
     GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create()
@@ -116,6 +122,40 @@ class TranslateConfigActivity : BaseActivity<ComposeActivityBinding>(imageBg = f
 
     override val binding by viewBinding(ComposeActivityBinding::inflate)
 
+    private var pendingImportModelSpec: LocalNmtModelSpec? = null
+    private val importNmtZipLauncher = registerForActivityResult(SelectFileContract()) { uri ->
+        val spec = pendingImportModelSpec
+        pendingImportModelSpec = null
+        if (uri == null || spec == null) return@registerForActivityResult
+        lifecycleScope.launch {
+            toastOnUi("正在导入 ${spec.name}...")
+            val result = withContext(IO) {
+                LocalNmtModelManager.importModelZip(this@TranslateConfigActivity, uri, spec)
+            }
+            result.fold(
+                onSuccess = { toastOnUi("已成功导入 ${spec.name}") },
+                onFailure = { err -> toastOnUi("导入失败：${err.localizedMessage ?: err.javaClass.simpleName}") },
+            )
+        }
+    }
+
+    private var pendingImportHyMtSpec: LocalHyMtModelSpec? = null
+    private val importHyMtGgufLauncher = registerForActivityResult(SelectFileContract()) { uri ->
+        val spec = pendingImportHyMtSpec
+        pendingImportHyMtSpec = null
+        if (uri == null || spec == null) return@registerForActivityResult
+        lifecycleScope.launch {
+            toastOnUi("正在导入 ${spec.name}...")
+            val result = withContext(IO) {
+                LocalHyMtModelManager.importGgufFile(this@TranslateConfigActivity, uri, spec)
+            }
+            result.fold(
+                onSuccess = { toastOnUi("已成功导入 ${spec.name}") },
+                onFailure = { err -> toastOnUi("导入失败：${err.localizedMessage ?: err.javaClass.simpleName}") },
+            )
+        }
+    }
+
     override fun onActivityCreated(savedInstanceState: Bundle?) {
         binding.composeView.setContent {
             NgAppTheme {
@@ -124,6 +164,14 @@ class TranslateConfigActivity : BaseActivity<ComposeActivityBinding>(imageBg = f
                     onToast = ::toastOnUi,
                     onCopy = { text -> sendToClip(text) },
                     onReadClip = { getClipText() },
+                    onImportNmtZip = { spec ->
+                        pendingImportModelSpec = spec
+                        importNmtZipLauncher.launch(arrayOf("application/zip", "application/octet-stream", "*/*"))
+                    },
+                    onImportHyMtGguf = { spec ->
+                        pendingImportHyMtSpec = spec
+                        importHyMtGgufLauncher.launch(arrayOf("application/octet-stream", "*/*"))
+                    },
                 )
             }
         }
@@ -195,16 +243,14 @@ private fun TranslateConfigRoot(
     onToast: (String) -> Unit,
     onCopy: (String) -> Unit,
     onReadClip: () -> String?,
+    onImportNmtZip: (LocalNmtModelSpec) -> Unit,
+    onImportHyMtGguf: (LocalHyMtModelSpec) -> Unit,
 ) {
     var engines by remember { mutableStateOf(TranslateConfig.getEngines()) }
     var activeEngineId by remember { mutableStateOf<String?>(null) }
     var isCreatingEngine by remember { mutableStateOf(false) }
-    var dictRuleNames by remember { mutableStateOf<List<String>>(emptyList()) }
 
     LaunchedEffect(Unit) {
-        dictRuleNames = withContext(IO) {
-            appDb.dictRuleDao.enabled.map { it.name }
-        }
         TranslateHistoryStore.getAllBooks()
     }
 
@@ -215,10 +261,10 @@ private fun TranslateConfigRoot(
     val activeEngine = remember(engines, activeEngineId, isCreatingEngine) {
         if (isCreatingEngine) {
             TranslateEngineItem(
-                name = "自定义翻译",
-                type = TranslateProvider.BING,
+                name = "自定义 Google 翻译",
+                type = TranslateProvider.GOOGLE,
                 enabled = true,
-                endpoint = TranslateProvider.BING.defaultEndpoint,
+                endpoint = TranslateProvider.GOOGLE.defaultEndpoint,
             )
         } else {
             activeEngineId?.let { id -> engines.firstOrNull { it.id == id } }
@@ -232,61 +278,69 @@ private fun TranslateConfigRoot(
             .statusBarsPadding()
             .navigationBarsPadding(),
     ) {
-        if (activeEngine == null) {
-            TranslateEngineListView(
-                engines = engines,
-                onBack = onFinish,
-                onClickEngine = { item ->
-                    isCreatingEngine = false
-                    activeEngineId = item.id
-                },
-                onToggleEngine = { item, checked ->
-                    TranslateConfig.setEngineEnabled(item.id, checked)
-                    reloadEngines()
-                },
-                onDeleteEngine = { item ->
-                    TranslateConfig.deleteEngine(item.id)
-                    reloadEngines()
-                    onToast("已删除 ${item.name.ifBlank { item.type.label }}")
-                },
-                onAddEngine = {
-                    isCreatingEngine = true
-                    activeEngineId = null
-                },
-                onResetDefault = {
-                    TranslateConfig.resetDefaultEngines()
-                    reloadEngines()
-                    onToast("已恢复默认翻译引擎")
-                },
-            )
-        } else {
-            TranslateEngineDetailView(
-                engine = activeEngine,
-                isNew = isCreatingEngine,
-                dictRuleNames = dictRuleNames,
-                onBack = {
-                    isCreatingEngine = false
-                    activeEngineId = null
-                },
-                onSaveEngine = { updated ->
-                    TranslateConfig.upsertEngine(updated)
-                    reloadEngines()
-                    isCreatingEngine = false
-                    activeEngineId = updated.id
-                    onToast("已保存 ${updated.name}")
-                },
-                onDeleteEngine = if (isCreatingEngine) null else {
-                    {
-                        TranslateConfig.deleteEngine(activeEngine.id)
+        when {
+            activeEngine == null -> {
+                TranslateEngineListView(
+                    engines = engines,
+                    onBack = onFinish,
+                    onClickEngine = { item ->
+                        isCreatingEngine = false
+                        activeEngineId = item.id
+                    },
+                    onToggleEngine = { item, checked ->
+                        TranslateConfig.setEngineEnabled(item.id, checked)
                         reloadEngines()
+                    },
+                    onDeleteEngine = { item ->
+                        TranslateConfig.deleteEngine(item.id)
+                        reloadEngines()
+                        onToast("已删除 ${item.name.ifBlank { item.type.label }}")
+                    },
+                    onAddEngine = {
+                        isCreatingEngine = true
                         activeEngineId = null
-                        onToast("已删除 ${activeEngine.name.ifBlank { activeEngine.type.label }}")
-                    }
-                },
-                onToast = onToast,
-                onCopy = onCopy,
-                onReadClip = onReadClip,
-            )
+                    },
+                    onResetCooldowns = {
+                        BookTitleTranslator.resetAllCooldowns()
+                        onToast("已重置全部引擎冷却状态")
+                    },
+                    onResetDefault = {
+                        TranslateConfig.resetDefaultEngines()
+                        reloadEngines()
+                        onToast("已恢复默认翻译引擎")
+                    },
+                )
+            }
+            else -> {
+                TranslateEngineDetailView(
+                    engine = activeEngine,
+                    isNew = isCreatingEngine,
+                    onBack = {
+                        isCreatingEngine = false
+                        activeEngineId = null
+                    },
+                    onSaveEngine = { updated ->
+                        TranslateConfig.upsertEngine(updated)
+                        reloadEngines()
+                        isCreatingEngine = false
+                        activeEngineId = updated.id
+                        onToast("已保存 ${updated.name}")
+                    },
+                    onDeleteEngine = if (isCreatingEngine || TranslateConfig.isBuiltInEngine(activeEngine.id)) null else {
+                        {
+                            TranslateConfig.deleteEngine(activeEngine.id)
+                            reloadEngines()
+                            activeEngineId = null
+                            onToast("已删除 ${activeEngine.name.ifBlank { activeEngine.type.label }}")
+                        }
+                    },
+                    onImportNmtZip = onImportNmtZip,
+                    onImportHyMtGguf = onImportHyMtGguf,
+                    onToast = onToast,
+                    onCopy = onCopy,
+                    onReadClip = onReadClip,
+                )
+            }
         }
     }
 }
@@ -299,11 +353,13 @@ private fun TranslateEngineListView(
     onToggleEngine: (TranslateEngineItem, Boolean) -> Unit,
     onDeleteEngine: (TranslateEngineItem) -> Unit,
     onAddEngine: () -> Unit,
+    onResetCooldowns: () -> Unit,
     onResetDefault: () -> Unit,
 ) {
     var query by remember { mutableStateOf("") }
     val menuState = remember { NgPopupToggleState() }
     val historyBooks by TranslateHistoryStore.booksFlow.collectAsState()
+    val healthRevision by BookTitleTranslator.healthRevision.collectAsState()
     val visibleEngines = remember(engines, query) {
         val q = query.trim()
         if (q.isEmpty()) engines
@@ -339,6 +395,12 @@ private fun TranslateEngineListView(
                             iconRes = R.drawable.ic_add,
                         ),
                         NgExpandableActionMenuItem(
+                            itemId = MENU_RESET_COOLDOWN,
+                            titleRes = 0,
+                            title = "重置引擎冷却",
+                            iconRes = R.drawable.ic_refresh_black_24dp,
+                        ),
+                        NgExpandableActionMenuItem(
                             itemId = MENU_RESET_ENGINES,
                             titleRes = R.string.ai_provider_reset,
                             iconRes = R.drawable.ic_restore,
@@ -352,6 +414,7 @@ private fun TranslateEngineListView(
                         menuState.close()
                         when (item.itemId) {
                             MENU_ADD_ENGINE -> onAddEngine()
+                            MENU_RESET_COOLDOWN -> onResetCooldowns()
                             MENU_RESET_ENGINES -> onResetDefault()
                         }
                     },
@@ -396,30 +459,30 @@ private fun TranslateEngineListView(
                     items = visibleEngines,
                     key = TranslateEngineItem::id,
                 ) { engine ->
-                    val keyTag = when (engine.type) {
-                        TranslateProvider.BING, TranslateProvider.GOOGLE ->
-                            NgStatusTagSpec("免 Key", NgStatusTagVariant.INFO, NgStatusTagStyle.COMPACT)
-                        TranslateProvider.YOUDAO, TranslateProvider.BAIDU ->
-                            if (engine.apiKey.isNotBlank() && engine.apiSecret.isNotBlank()) {
-                                NgStatusTagSpec("已配置密钥", NgStatusTagVariant.INFO, NgStatusTagStyle.COMPACT)
-                            } else {
-                                NgStatusTagSpec("未配置密钥", NgStatusTagVariant.WARNING, NgStatusTagStyle.COMPACT)
+                    val inCooldown = remember(healthRevision, engine.id) {
+                        BookTitleTranslator.isEngineInCooldown(engine.id)
+                    }
+                    val cooldownSecs = remember(healthRevision, engine.id, inCooldown) {
+                        if (inCooldown) BookTitleTranslator.cooldownRemainingSeconds(engine.id) else 0L
+                    }
+                    val engineHistoryCount = remember(historyBooks, engine.id) {
+                        historyBooks.count { it.engineId == engine.id }
+                    }
+                    val keyTag = if (inCooldown) {
+                        NgStatusTagSpec("冷却 ${cooldownSecs}s", NgStatusTagVariant.ERROR, NgStatusTagStyle.COMPACT)
+                    } else {
+                        when (engine.type) {
+                            TranslateProvider.HY_MT_OFFLINE -> {
+                                val badge = LocalHyMtModelManager.findSpec(engine.localModelId)?.badgeLabel ?: "本地 GGUF"
+                                NgStatusTagSpec(badge, NgStatusTagVariant.INFO, NgStatusTagStyle.COMPACT)
                             }
-                        TranslateProvider.DEEPL ->
-                            when {
-                                !engine.endpoint.contains("deepl.com", ignoreCase = true) && engine.endpoint.isNotBlank() ->
-                                    NgStatusTagSpec("自定义 API", NgStatusTagVariant.INFO, NgStatusTagStyle.COMPACT)
-                                engine.apiKey.isNotBlank() ->
-                                    NgStatusTagSpec("已配置 Key", NgStatusTagVariant.INFO, NgStatusTagStyle.COMPACT)
-                                else ->
-                                    NgStatusTagSpec("未配置 Key", NgStatusTagVariant.WARNING, NgStatusTagStyle.COMPACT)
-                            }
-                        TranslateProvider.DICT_RULE ->
-                            NgStatusTagSpec(
-                                engine.dictRuleName.ifBlank { "自动选规则" },
-                                NgStatusTagVariant.INFO,
-                                NgStatusTagStyle.COMPACT,
-                            )
+                            TranslateProvider.LOCAL_NMT ->
+                                NgStatusTagSpec("离线 NMT", NgStatusTagVariant.INFO, NgStatusTagStyle.COMPACT)
+                            TranslateProvider.MLKIT_OFFLINE ->
+                                NgStatusTagSpec("ML Kit 离线", NgStatusTagVariant.INFO, NgStatusTagStyle.COMPACT)
+                            TranslateProvider.GOOGLE ->
+                                NgStatusTagSpec("免 Key", NgStatusTagVariant.INFO, NgStatusTagStyle.COMPACT)
+                        }
                     }
                     val statusTags = listOf(
                         NgStatusTagSpec(
@@ -430,22 +493,35 @@ private fun TranslateEngineListView(
                         keyTag,
                     )
 
-                    val hostLabel = remember(engine.endpoint) {
-                        runCatching {
-                            val u = engine.endpoint.trim()
-                            if (u.startsWith("dict://")) u
-                            else java.net.URI(u).host.orEmpty().ifBlank { u }
-                        }.getOrDefault(engine.endpoint)
+                    val hostLabel = remember(engine.endpoint, engine.type, engine.localModelId) {
+                        when (engine.type) {
+                            TranslateProvider.HY_MT_OFFLINE -> {
+                                val resolvedSpec = LocalHyMtModelManager.findSpec(engine.localModelId)
+                                resolvedSpec?.name ?: engine.localModelId.ifBlank {
+                                    LocalHyMtModelManager.catalog.firstOrNull()?.name ?: "端侧 GGUF 模型"
+                                }
+                            }
+                            TranslateProvider.LOCAL_NMT -> engine.localModelId.ifBlank { "自动按语种/接力路由" }
+                            TranslateProvider.MLKIT_OFFLINE -> "内置独立离线推理"
+                            TranslateProvider.GOOGLE -> {
+                                val target = engine.endpoint.trim()
+                                runCatching {
+                                    java.net.URI(target.substringBefore(',')).host.orEmpty().ifBlank { target }
+                                }.getOrDefault(target)
+                            }
+                        }
                     }
-                    val summaryLabel = remember(hostLabel, engine.type.label, historyBooks.size, engine.enabled) {
+                    val summaryLabel = remember(hostLabel, engine.type.label, engineHistoryCount, engine.enabled, inCooldown) {
                         val base = hostLabel.ifBlank { engine.type.label }
-                        if (historyBooks.isNotEmpty() && engine.enabled) "$base · ${historyBooks.size}条记录"
-                        else base
+                        when {
+                            inCooldown -> "$base · 熔断冷却中"
+                            engineHistoryCount > 0 -> "$base · ${engineHistoryCount}条记录"
+                            else -> base
+                        }
                     }
 
-                    LeftSwipeToDelete(
-                        onDeleteRequested = { onDeleteEngine(engine) },
-                    ) {
+                    val isBuiltIn = TranslateConfig.isBuiltInEngine(engine.id)
+                    val engineCard: @Composable () -> Unit = {
                         NgManagementListCard(
                             title = engine.name.ifBlank { engine.type.label },
                             variant = NgManagementListCardVariant.PROVIDER_TWO_ROW,
@@ -475,6 +551,15 @@ private fun TranslateEngineListView(
                             },
                         )
                     }
+                    if (isBuiltIn) {
+                        engineCard()
+                    } else {
+                        LeftSwipeToDelete(
+                            onDeleteRequested = { onDeleteEngine(engine) },
+                        ) {
+                            engineCard()
+                        }
+                    }
                 }
             }
         }
@@ -485,17 +570,18 @@ private fun TranslateEngineListView(
 private fun TranslateEngineDetailView(
     engine: TranslateEngineItem,
     isNew: Boolean,
-    dictRuleNames: List<String>,
     onBack: () -> Unit,
     onSaveEngine: (TranslateEngineItem) -> Unit,
     onDeleteEngine: (() -> Unit)?,
+    onImportNmtZip: (LocalNmtModelSpec) -> Unit,
+    onImportHyMtGguf: (LocalHyMtModelSpec) -> Unit,
     onToast: (String) -> Unit,
     onCopy: (String) -> Unit,
     onReadClip: () -> String?,
 ) {
     var selectedTab by remember(engine.id) { mutableIntStateOf(0) }
-    var selectedHistoryBookKey by remember { mutableStateOf<String?>(null) }
-    var selectedHistoryChapterIndex by remember { mutableStateOf<Int?>(null) }
+    var selectedHistoryBookKey by remember(engine.id) { mutableStateOf<String?>(null) }
+    var selectedHistoryChapterIndex by remember(engine.id) { mutableStateOf<Int?>(null) }
 
     BackHandler {
         when {
@@ -510,16 +596,18 @@ private fun TranslateEngineDetailView(
             0 -> TranslateEngineConfigTab(
                 engine = engine,
                 isNew = isNew,
-                dictRuleNames = dictRuleNames,
                 onBack = onBack,
                 onSaveEngine = onSaveEngine,
                 onDeleteEngine = onDeleteEngine,
+                onImportNmtZip = onImportNmtZip,
+                onImportHyMtGguf = onImportHyMtGguf,
                 onToast = onToast,
                 onCopy = onCopy,
                 onReadClip = onReadClip,
                 modifier = Modifier.weight(1f),
             )
-            else -> TranslateHistoryTab(
+            else -> TranslateHistoryManageTab(
+                engineId = engine.id,
                 selectedBookKey = selectedHistoryBookKey,
                 selectedChapterIndex = selectedHistoryChapterIndex,
                 onSelectBook = {
@@ -559,10 +647,11 @@ private fun TranslateEngineDetailView(
 private fun TranslateEngineConfigTab(
     engine: TranslateEngineItem,
     isNew: Boolean,
-    dictRuleNames: List<String>,
     onBack: () -> Unit,
     onSaveEngine: (TranslateEngineItem) -> Unit,
     onDeleteEngine: (() -> Unit)?,
+    onImportNmtZip: (LocalNmtModelSpec) -> Unit,
+    onImportHyMtGguf: (LocalHyMtModelSpec) -> Unit,
     onToast: (String) -> Unit,
     onCopy: (String) -> Unit,
     onReadClip: () -> String?,
@@ -572,15 +661,14 @@ private fun TranslateEngineConfigTab(
     val arrow = painterResource(R.drawable.ic_arrow_drop_down)
     val scrollState = rememberScrollState()
 
+    val isBuiltIn = remember(engine.id, isNew) { !isNew && TranslateConfig.isBuiltInEngine(engine.id) }
     var jsonMode by remember(engine.id) { mutableStateOf(false) }
+    var selectedType by remember(engine.id) { mutableStateOf(engine.type) }
     var name by remember(engine.id) { mutableStateOf(engine.name) }
     var endpoint by remember(engine.id) { mutableStateOf(engine.endpoint.ifBlank { engine.type.defaultEndpoint }) }
     var engineEnabled by remember(engine.id) { mutableStateOf(engine.enabled) }
-    var apiKey by remember(engine.id) { mutableStateOf(engine.apiKey) }
-    var apiSecret by remember(engine.id) { mutableStateOf(engine.apiSecret) }
-    var dictRuleName by remember(engine.id) {
-        mutableStateOf(engine.dictRuleName.ifBlank { dictRuleNames.firstOrNull().orEmpty() })
-    }
+    var localModelId by remember(engine.id) { mutableStateOf(engine.localModelId) }
+    var mlkitWifiOnly by remember(engine.id) { mutableStateOf(engine.mlkitWifiOnly) }
     var targetLang by remember(engine.id) {
         mutableStateOf(engine.targetLang.ifBlank { TranslateConfig.targetLang })
     }
@@ -592,41 +680,47 @@ private fun TranslateEngineConfigTab(
     var globalIntro by remember { mutableStateOf(TranslateConfig.translateIntro) }
     var globalCatalog by remember { mutableStateOf(TranslateConfig.translateCatalog) }
     var globalContentDefault by remember { mutableStateOf(TranslateConfig.translateContentDefault) }
-    var cacheCount by remember { mutableIntStateOf(BookTitleTranslator.cacheSize()) }
 
     var testInput by remember { mutableStateOf("New Action Movie & Free Videos") }
     var testing by remember { mutableStateOf(false) }
     var testResult by remember { mutableStateOf<String?>(null) }
-
-    val inferredType = remember(endpoint, engine.type) {
-        TranslateProvider.inferFromUrl(endpoint, engine.type)
+    val healthRevision by BookTitleTranslator.healthRevision.collectAsState()
+    val nmtInstalledRevision by LocalNmtModelManager.installedRevision.collectAsState()
+    val hymtInstalledRevision by LocalHyMtModelManager.installedRevision.collectAsState()
+    val inCooldown = remember(healthRevision, engine.id) {
+        BookTitleTranslator.isEngineInCooldown(engine.id)
     }
 
     fun buildFormDraft(): TranslateEngineItem = engine.copy(
-        name = name.trim().ifBlank { inferredType.label },
-        type = inferredType,
+        name = name.trim().ifBlank { selectedType.label },
+        type = selectedType,
         enabled = engineEnabled,
-        endpoint = endpoint.trim().ifBlank { inferredType.defaultEndpoint },
+        endpoint = endpoint.trim().ifBlank { selectedType.defaultEndpoint },
         targetLang = targetLang,
-        apiKey = apiKey.trim(),
-        apiSecret = apiSecret.trim(),
-        dictRuleName = dictRuleName.trim(),
+        localModelId = localModelId.trim(),
+        mlkitWifiOnly = mlkitWifiOnly,
     ).normalized()
 
     fun parseJsonDraft(raw: String): Result<TranslateEngineItem> = runCatching {
         val parsed = prettyGson.fromJson(raw, TranslateEngineItem::class.java)
             ?: error("JSON 内容为空")
-        val resolvedId = parsed.id.ifBlank { engine.id }
-        parsed.copy(id = resolvedId).normalized()
+        @Suppress("SENSELESS_ELVIS")
+        val parsedType: TranslateProvider? = parsed.type
+        if (parsedType == null) {
+            throw IllegalArgumentException("不支持的引擎类型，仅支持 HY_MT_OFFLINE / LOCAL_NMT / MLKIT_OFFLINE / GOOGLE")
+        }
+        val resolvedId = if (isBuiltIn) engine.id else parsed.id.ifBlank { engine.id }
+        val resolvedType = if (isBuiltIn) engine.type else parsedType
+        parsed.copy(id = resolvedId, type = resolvedType).normalized()
     }
 
     fun applyDraftToForm(item: TranslateEngineItem) {
+        selectedType = item.type
         name = item.name
         endpoint = item.endpoint
         engineEnabled = item.enabled
-        apiKey = item.apiKey
-        apiSecret = item.apiSecret
-        dictRuleName = item.dictRuleName
+        localModelId = item.localModelId
+        mlkitWifiOnly = item.mlkitWifiOnly
         if (item.targetLang.isNotBlank()) {
             targetLang = item.targetLang
             TranslateConfig.targetLang = item.targetLang
@@ -672,7 +766,7 @@ private fun TranslateEngineConfigTab(
 
     Column(modifier = modifier.fillMaxWidth()) {
         NgFloatingTitleToolbar(
-            title = if (isNew) "新增翻译引擎" else name.ifBlank { inferredType.label },
+            title = if (isNew) "新增翻译引擎" else name.ifBlank { selectedType.label },
             onBack = onBack,
             modifier = Modifier
                 .fillMaxWidth()
@@ -862,33 +956,71 @@ private fun TranslateEngineConfigTab(
                 }
             } else {
                 TranslateSectionCard("引擎接入配置") {
-                    NgFormSwitchRow(
-                        title = "启用此翻译引擎",
-                        checked = engineEnabled,
-                        onCheckedChange = { engineEnabled = it },
-                        density = NgFormDensity.COMPACT,
-                    )
-                    Spacer(Modifier.height(8.dp))
+                    if (inCooldown) {
+                        NgFormActionButton(
+                            text = "重置本引擎熔断冷却 (${BookTitleTranslator.cooldownRemainingSeconds(engine.id)}s)",
+                            onClick = {
+                                BookTitleTranslator.resetEngineCooldown(engine.id)
+                                onToast("已解除冷却")
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            variant = NgButtonVariant.OUTLINE,
+                            appearance = NgFormActionButtonAppearance.SURFACE_CARD,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    if (!isBuiltIn) {
+                        NgFormSelectField(
+                            label = "引擎类型",
+                            selectedValue = selectedType.id,
+                            options = TranslateProvider.entries.map {
+                                NgFormSelectOption(label = it.label, value = it.id)
+                            },
+                            onValueChange = { id ->
+                                val oldType = selectedType
+                                val nextType = TranslateProvider.fromId(id)
+                                selectedType = nextType
+                                if (name.isBlank() || name == oldType.label || name == "自定义 Google 翻译") {
+                                    name = nextType.label
+                                }
+                                if (endpoint.isBlank() || endpoint == oldType.defaultEndpoint) {
+                                    endpoint = nextType.defaultEndpoint
+                                }
+                                if (nextType == TranslateProvider.HY_MT_OFFLINE && localModelId.isBlank()) {
+                                    localModelId = LocalHyMtModelManager.catalog
+                                        .firstOrNull { LocalHyMtModelManager.isInstalled(it.id) }?.id
+                                        ?: LocalHyMtModelManager.catalog.firstOrNull()?.id.orEmpty()
+                                } else if (oldType == TranslateProvider.HY_MT_OFFLINE && nextType != TranslateProvider.HY_MT_OFFLINE) {
+                                    localModelId = ""
+                                }
+                            },
+                            arrowIcon = arrow,
+                            density = NgFormDensity.COMPACT,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                    }
                     NgFormField(
                         label = "引擎名称",
                         value = name,
                         onValueChange = { name = it },
                         density = NgFormDensity.COMPACT,
                     )
-                    Spacer(Modifier.height(8.dp))
-                    NgFormField(
-                        label = "接入 API URL",
-                        value = endpoint,
-                        onValueChange = { endpoint = it },
-                        placeholder = "https://... 或 dict://rule",
-                        density = NgFormDensity.COMPACT,
-                    )
+                    if (selectedType == TranslateProvider.GOOGLE) {
+                        Spacer(Modifier.height(8.dp))
+                        NgFormField(
+                            label = "接入 API URL",
+                            value = endpoint,
+                            onValueChange = { endpoint = it },
+                            placeholder = selectedType.defaultEndpoint,
+                            density = NgFormDensity.COMPACT,
+                        )
+                    }
                     Spacer(Modifier.height(8.dp))
                     NgFormSelectField(
                         label = "目标语言",
                         selectedValue = targetLang,
                         options = TranslateConfig.supportedTargetLangs.map {
-                            NgFormSelectOption(it.code, it.label)
+                            NgFormSelectOption(label = it.label, value = it.code)
                         },
                         onValueChange = {
                             targetLang = it
@@ -898,67 +1030,62 @@ private fun TranslateEngineConfigTab(
                         density = NgFormDensity.COMPACT,
                     )
                     Spacer(Modifier.height(8.dp))
-                    when (inferredType) {
-                        TranslateProvider.YOUDAO -> {
-                            NgFormField(
-                                label = "AppKey (应用 ID)",
-                                value = apiKey,
-                                onValueChange = { apiKey = it },
-                                density = NgFormDensity.COMPACT,
-                            )
-                            Spacer(Modifier.height(8.dp))
-                            NgFormField(
-                                label = "应用密钥 (AppSecret)",
-                                value = apiSecret,
-                                onValueChange = { apiSecret = it },
-                                density = NgFormDensity.COMPACT,
-                            )
-                        }
-                        TranslateProvider.BAIDU -> {
-                            NgFormField(
-                                label = "AppID",
-                                value = apiKey,
-                                onValueChange = { apiKey = it },
-                                density = NgFormDensity.COMPACT,
-                            )
-                            Spacer(Modifier.height(8.dp))
-                            NgFormField(
-                                label = "密钥 (SecretKey)",
-                                value = apiSecret,
-                                onValueChange = { apiSecret = it },
-                                density = NgFormDensity.COMPACT,
-                            )
-                        }
-                        TranslateProvider.DEEPL -> {
-                            NgFormField(
-                                label = "API Key / Auth Key（无鉴权接口可留空）",
-                                value = apiKey,
-                                onValueChange = { apiKey = it },
-                                density = NgFormDensity.COMPACT,
-                            )
-                        }
-                        TranslateProvider.DICT_RULE -> {
-                            if (dictRuleNames.isEmpty()) {
-                                Text(
-                                    text = "当前没有已启用的字典规则，请先到「规则管理 -> 字典规则」启用规则。",
-                                    color = Color(NgTheme.colors.onSurfaceVariant),
-                                    fontSize = 12.sp,
-                                    lineHeight = 18.sp,
-                                )
-                            } else {
-                                NgFormSelectField(
-                                    label = "使用的字典规则",
-                                    selectedValue = dictRuleName,
-                                    options = dictRuleNames.map { NgFormSelectOption(it, it) },
-                                    onValueChange = { dictRuleName = it },
-                                    arrowIcon = arrow,
-                                    density = NgFormDensity.COMPACT,
-                                )
+                    when (selectedType) {
+                        TranslateProvider.HY_MT_OFFLINE -> {
+                            val hymtOptions = remember(hymtInstalledRevision) {
+                                LocalHyMtModelManager.catalog
+                                    .filter { it.downloadable || LocalHyMtModelManager.isInstalled(it.id) }
+                                    .ifEmpty { LocalHyMtModelManager.catalog }
+                                    .map { spec ->
+                                        val ok = LocalHyMtModelManager.isInstalled(spec.id)
+                                        NgFormSelectOption(
+                                            label = if (ok) "${spec.name} [已安装]" else "${spec.name} [未下载]",
+                                            value = spec.id,
+                                        )
+                                    }
                             }
+                            NgFormSelectField(
+                                label = "端侧推理模型",
+                                selectedValue = localModelId.ifBlank {
+                                    LocalHyMtModelManager.catalog.firstOrNull()?.id.orEmpty()
+                                },
+                                options = hymtOptions,
+                                onValueChange = { localModelId = it },
+                                arrowIcon = arrow,
+                                density = NgFormDensity.COMPACT,
+                            )
                         }
-                        else -> {
+                        TranslateProvider.LOCAL_NMT -> {
+                            val nmtOptions = remember(nmtInstalledRevision) {
+                                listOf(NgFormSelectOption(label = "自动按语种/接力路由", value = "")) +
+                                    LocalNmtModelManager.catalog.map { spec ->
+                                        val ok = LocalNmtModelManager.isInstalled(spec.id)
+                                        NgFormSelectOption(
+                                            label = if (ok) "${spec.name} [已安装]" else "${spec.name} [未下载]",
+                                            value = spec.id,
+                                        )
+                                    }
+                            }
+                            NgFormSelectField(
+                                label = "开源 NMT 模型",
+                                selectedValue = localModelId,
+                                options = nmtOptions,
+                                onValueChange = { localModelId = it },
+                                arrowIcon = arrow,
+                                density = NgFormDensity.COMPACT,
+                            )
+                        }
+                        TranslateProvider.MLKIT_OFFLINE -> {
+                            NgFormSwitchRow(
+                                title = "仅在 Wi-Fi 下自动拉取语言包",
+                                checked = mlkitWifiOnly,
+                                onCheckedChange = { mlkitWifiOnly = it },
+                                density = NgFormDensity.COMPACT,
+                            )
+                        }
+                        TranslateProvider.GOOGLE -> {
                             Text(
-                                text = inferredType.summary,
+                                text = selectedType.summary,
                                 color = Color(NgTheme.colors.onSurfaceVariant),
                                 fontSize = 12.sp,
                             )
@@ -1015,7 +1142,7 @@ private fun TranslateEngineConfigTab(
                             CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                             Spacer(Modifier.width(8.dp))
                             Text(
-                                text = "正在测试 ${name.ifBlank { inferredType.label }}...",
+                                text = "正在测试 ${name.ifBlank { selectedType.label }}...",
                                 color = Color(NgTheme.colors.onSurfaceVariant),
                                 fontSize = 12.sp,
                             )
@@ -1030,6 +1157,27 @@ private fun TranslateEngineConfigTab(
                             lineHeight = 18.sp,
                         )
                     }
+                }
+                when (selectedType) {
+                    TranslateProvider.HY_MT_OFFLINE -> HyMtOfflineModelSection(
+                        arrowIcon = arrow,
+                        selectedModelId = localModelId.ifBlank {
+                            LocalHyMtModelManager.catalog.firstOrNull()?.id.orEmpty()
+                        },
+                        onSelectModel = { localModelId = it },
+                        onImportHyMtGguf = onImportHyMtGguf,
+                        onToast = onToast,
+                    )
+                    TranslateProvider.LOCAL_NMT -> NmtOfflineModelSection(
+                        arrowIcon = arrow,
+                        onImportNmtZip = onImportNmtZip,
+                        onToast = onToast,
+                    )
+                    TranslateProvider.MLKIT_OFFLINE -> MlKitOfflineModelSection(
+                        wifiOnly = mlkitWifiOnly,
+                        onToast = onToast,
+                    )
+                    TranslateProvider.GOOGLE -> Unit
                 }
             }
 
@@ -1073,450 +1221,13 @@ private fun TranslateEngineConfigTab(
                     },
                     density = NgFormDensity.COMPACT,
                 )
-                Spacer(Modifier.height(10.dp))
-                NgFormActionButton(
-                    text = "清空临时译名缓存 ($cacheCount)",
-                    onClick = {
-                        BookTitleTranslator.clearCache()
-                        cacheCount = 0
-                        onToast("已清空临时译名缓存（离线翻译记录仍保留）")
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    variant = NgButtonVariant.OUTLINE,
-                    appearance = NgFormActionButtonAppearance.SURFACE_CARD,
-                )
             }
         }
     }
 }
 
 @Composable
-private fun TranslateHistoryTab(
-    selectedBookKey: String?,
-    selectedChapterIndex: Int?,
-    onSelectBook: (String?) -> Unit,
-    onSelectChapter: (Int?) -> Unit,
-    onBackToRoot: () -> Unit,
-    onToast: (String) -> Unit,
-    onCopy: (String) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val books by TranslateHistoryStore.booksFlow.collectAsState()
-    val selectedBook = remember(books, selectedBookKey) {
-        selectedBookKey?.let { key -> books.firstOrNull { it.bookKey == key } }
-    }
-    val selectedChapter = remember(selectedBook, selectedChapterIndex) {
-        selectedChapterIndex?.let { idx -> selectedBook?.chapters?.firstOrNull { it.chapterIndex == idx } }
-    }
-
-    when {
-        selectedBook != null && selectedChapter != null -> {
-            TranslateChapterRecordView(
-                book = selectedBook,
-                chapter = selectedChapter,
-                onBack = { onSelectChapter(null) },
-                onCopy = { text ->
-                    onCopy(text)
-                    onToast("已复制")
-                },
-                modifier = modifier,
-            )
-        }
-        selectedBook != null -> {
-            TranslateBookTocHistoryView(
-                book = selectedBook,
-                onBack = { onSelectBook(null) },
-                onClickChapter = { onSelectChapter(it.chapterIndex) },
-                onDeleteChapter = { chapter ->
-                    TranslateHistoryStore.deleteChapter(selectedBook.bookKey, chapter.chapterIndex)
-                    onToast("已删除章节翻译记录")
-                },
-                onCopy = { text ->
-                    onCopy(text)
-                    onToast("已复制")
-                },
-                modifier = modifier,
-            )
-        }
-        else -> {
-            TranslateBookListHistoryView(
-                books = books,
-                onBack = onBackToRoot,
-                onClickBook = { onSelectBook(it.bookKey) },
-                onDeleteBook = { book ->
-                    TranslateHistoryStore.deleteBook(book.bookKey)
-                    onToast("已删除《${book.displayTitle}》的翻译记录")
-                },
-                onClearAll = {
-                    TranslateHistoryStore.clearAll()
-                    onToast("已清空全部翻译记录")
-                },
-                modifier = modifier,
-            )
-        }
-    }
-}
-
-@Composable
-private fun TranslateBookListHistoryView(
-    books: List<TranslatedBookHistory>,
-    onBack: () -> Unit,
-    onClickBook: (TranslatedBookHistory) -> Unit,
-    onDeleteBook: (TranslatedBookHistory) -> Unit,
-    onClearAll: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    var query by remember { mutableStateOf("") }
-    val filtered = remember(books, query) {
-        val q = query.trim()
-        if (q.isEmpty()) books
-        else books.filter {
-            it.displayTitle.contains(q, ignoreCase = true) ||
-                it.originalTitle.contains(q, ignoreCase = true)
-        }
-    }
-
-    Column(modifier = modifier.fillMaxWidth()) {
-        NgFloatingSearchToolbar(
-            query = query,
-            onQueryChange = { query = it },
-            hint = "搜索翻译后的书名或原名",
-            onBack = onBack,
-            modifier = Modifier.padding(horizontal = 16.dp),
-            onSearch = {},
-        ) {
-            if (books.isNotEmpty()) {
-                NgFloatingToolbarActionButton(
-                    iconRes = R.drawable.ic_book_info_delete,
-                    contentDescription = "清空全部翻译记录",
-                    onClick = onClearAll,
-                )
-            }
-        }
-
-        if (filtered.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .padding(24.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = if (books.isEmpty()) "暂无离线翻译记录\n浏览发现页或开启正文翻译后会自动保存在这里" else "未找到匹配的书籍记录",
-                    color = Color(NgTheme.colors.onSurfaceVariant),
-                    fontSize = 13.sp,
-                    lineHeight = 20.sp,
-                )
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-                contentPadding = PaddingValues(start = 16.dp, top = 10.dp, end = 16.dp, bottom = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                items(
-                    items = filtered,
-                    key = TranslatedBookHistory::bookKey,
-                ) { book ->
-                    val shape = RoundedCornerShape(NgTheme.shapes.largeDp.dp)
-                    val cardColor = colorResource(R.color.ng_translucent_management_card_surface)
-                    val strokeColor = colorResource(R.color.ng_translucent_management_card_stroke)
-                    LeftSwipeToDelete(
-                        onDeleteRequested = { onDeleteBook(book) },
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(shape)
-                                .background(cardColor)
-                                .border(0.6.dp, strokeColor, shape)
-                                .clickable { onClickBook(book) }
-                                .padding(horizontal = 14.dp, vertical = 12.dp),
-                        ) {
-                            Text(
-                                text = book.displayTitle,
-                                color = Color(NgTheme.colors.onSurface),
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            if (book.originalTitle.isNotBlank() && book.originalTitle != book.displayTitle) {
-                                Spacer(Modifier.height(3.dp))
-                                Text(
-                                    text = "原名：${book.originalTitle}",
-                                    color = Color(NgTheme.colors.onSurfaceVariant),
-                                    fontSize = 12.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                            Spacer(Modifier.height(6.dp))
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Text(
-                                    text = "已译章节：${book.chapters.size} 章",
-                                    color = Color(NgTheme.colors.primary),
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Medium,
-                                )
-                                if (book.translatedIntro.isNotBlank()) {
-                                    Text(
-                                        text = "· 含简介译文",
-                                        color = Color(NgTheme.colors.onSurfaceVariant),
-                                        fontSize = 11.sp,
-                                    )
-                                }
-                                if (book.engineName.isNotBlank()) {
-                                    Text(
-                                        text = "· ${book.engineName}",
-                                        color = Color(NgTheme.colors.onSurfaceVariant),
-                                        fontSize = 11.sp,
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun TranslateBookTocHistoryView(
-    book: TranslatedBookHistory,
-    onBack: () -> Unit,
-    onClickChapter: (TranslatedChapterHistory) -> Unit,
-    onDeleteChapter: (TranslatedChapterHistory) -> Unit,
-    onCopy: (String) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    var query by remember { mutableStateOf("") }
-    val chapters = remember(book.chapters, query) {
-        val q = query.trim()
-        if (q.isEmpty()) book.chapters
-        else book.chapters.filter {
-            it.displayChapterTitle.contains(q, ignoreCase = true) ||
-                it.originalChapterTitle.contains(q, ignoreCase = true)
-        }
-    }
-
-    Column(modifier = modifier.fillMaxWidth()) {
-        NgFloatingTitleToolbar(
-            title = book.displayTitle,
-            onBack = onBack,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp),
-        )
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
-            contentPadding = PaddingValues(start = 16.dp, top = 8.dp, end = 16.dp, bottom = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            item(key = "book_meta") {
-                TranslateSectionCard("书籍译名与简介记录") {
-                    Text(
-                        text = "译名：${book.displayTitle}",
-                        color = Color(NgTheme.colors.onSurface),
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium,
-                        modifier = Modifier.clickable { onCopy(book.displayTitle) },
-                    )
-                    if (book.originalTitle.isNotBlank()) {
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            text = "原名：${book.originalTitle}",
-                            color = Color(NgTheme.colors.onSurfaceVariant),
-                            fontSize = 12.sp,
-                            modifier = Modifier.clickable { onCopy(book.originalTitle) },
-                        )
-                    }
-                    if (book.translatedIntro.isNotBlank()) {
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            text = "简介译文：",
-                            color = Color(NgTheme.colors.primary),
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium,
-                        )
-                        Spacer(Modifier.height(2.dp))
-                        Text(
-                            text = book.translatedIntro,
-                            color = Color(NgTheme.colors.onSurface),
-                            fontSize = 13.sp,
-                            lineHeight = 19.sp,
-                            modifier = Modifier.clickable { onCopy(book.translatedIntro) },
-                        )
-                    }
-                }
-            }
-
-            if (book.chapters.isNotEmpty()) {
-                item(key = "chapter_search") {
-                    NgFormField(
-                        label = "筛选目录章节 (${book.chapters.size} 章)",
-                        value = query,
-                        onValueChange = { query = it },
-                        density = NgFormDensity.COMPACT,
-                    )
-                }
-            }
-
-            if (chapters.isEmpty()) {
-                item(key = "empty_chapters") {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 24.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            text = if (book.chapters.isEmpty()) {
-                                "本书暂无正文翻译目录\n阅读正文时点击顶栏翻译图标即可离线保存每章译文"
-                            } else {
-                                "未找到匹配的章节"
-                            },
-                            color = Color(NgTheme.colors.onSurfaceVariant),
-                            fontSize = 13.sp,
-                            lineHeight = 20.sp,
-                        )
-                    }
-                }
-            } else {
-                items(
-                    items = chapters,
-                    key = { "ch_${it.chapterIndex}" },
-                ) { chapter ->
-                    val shape = RoundedCornerShape(NgTheme.shapes.mediumDp.dp)
-                    val cardColor = colorResource(R.color.ng_translucent_management_card_surface)
-                    val strokeColor = colorResource(R.color.ng_translucent_management_card_stroke)
-                    LeftSwipeToDelete(
-                        onDeleteRequested = { onDeleteChapter(chapter) },
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(shape)
-                                .background(cardColor)
-                                .border(0.6.dp, strokeColor, shape)
-                                .clickable { onClickChapter(chapter) }
-                                .padding(horizontal = 14.dp, vertical = 11.dp),
-                        ) {
-                            Text(
-                                text = chapter.displayChapterTitle.ifBlank { "第 ${chapter.chapterIndex + 1} 章" },
-                                color = Color(NgTheme.colors.onSurface),
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Medium,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            if (chapter.originalChapterTitle.isNotBlank() &&
-                                chapter.originalChapterTitle != chapter.displayChapterTitle
-                            ) {
-                                Spacer(Modifier.height(2.dp))
-                                Text(
-                                    text = chapter.originalChapterTitle,
-                                    color = Color(NgTheme.colors.onSurfaceVariant),
-                                    fontSize = 12.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                            Spacer(Modifier.height(4.dp))
-                            Text(
-                                text = "已保存 ${chapter.paragraphs.size} 段离线译文",
-                                color = Color(NgTheme.colors.primary),
-                                fontSize = 11.sp,
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun TranslateChapterRecordView(
-    book: TranslatedBookHistory,
-    chapter: TranslatedChapterHistory,
-    onBack: () -> Unit,
-    onCopy: (String) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    var bilingual by remember { mutableStateOf(true) }
-
-    Column(modifier = modifier.fillMaxWidth()) {
-        NgFloatingTitleToolbar(
-            title = chapter.displayChapterTitle.ifBlank { "第 ${chapter.chapterIndex + 1} 章" },
-            onBack = onBack,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp),
-            trailingContent = {
-                NgFloatingToolbarActionButton(
-                    iconRes = R.drawable.ic_translate,
-                    contentDescription = if (bilingual) "仅看译文" else "双语对照",
-                    onClick = { bilingual = !bilingual },
-                )
-            },
-        )
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
-            contentPadding = PaddingValues(start = 16.dp, top = 8.dp, end = 16.dp, bottom = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            item(key = "ch_header") {
-                Text(
-                    text = "${book.displayTitle} · ${if (bilingual) "双语对照（点段落可复制）" else "仅译文（点段落可复制）"}",
-                    color = Color(NgTheme.colors.onSurfaceVariant),
-                    fontSize = 12.sp,
-                    modifier = Modifier.padding(horizontal = 4.dp),
-                )
-            }
-            items(
-                items = chapter.paragraphs,
-            ) { pair ->
-                val shape = RoundedCornerShape(10.dp)
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(shape)
-                        .background(colorResource(R.color.ng_translucent_management_card_surface))
-                        .clickable { onCopy(pair.translated) }
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                ) {
-                    Text(
-                        text = pair.translated,
-                        color = Color(NgTheme.colors.onSurface),
-                        fontSize = 14.sp,
-                        lineHeight = 21.sp,
-                    )
-                    if (bilingual && pair.original.isNotBlank() && pair.original != pair.translated) {
-                        Spacer(Modifier.height(5.dp))
-                        Text(
-                            text = pair.original,
-                            color = Color(NgTheme.colors.onSurfaceVariant),
-                            fontSize = 12.sp,
-                            lineHeight = 18.sp,
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun TranslateSectionCard(
+internal fun TranslateSectionCard(
     title: String,
     content: @Composable () -> Unit,
 ) {

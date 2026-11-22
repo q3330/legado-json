@@ -3,10 +3,12 @@ package io.legado.app.ui.main.bookshelf.style1
 import android.os.Bundle
 import android.view.View
 import android.widget.Scroller
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.ViewCompositionStrategy
@@ -23,6 +25,8 @@ import io.legado.app.help.config.BookshelfFloatingDockConfig
 import io.legado.app.help.config.BookshelfFloatingDockSearchPosition
 import io.legado.app.help.config.BookshelfHomeMode
 import io.legado.app.help.config.BookshelfTopBarStyle
+import io.legado.app.help.translate.BookTitleTranslator
+import io.legado.app.help.translate.TranslateHistoryStore
 import io.legado.app.ui.book.group.GroupManageDialog
 import io.legado.app.ui.book.info.BookInfoActivity
 import io.legado.app.ui.book.manage.BookshelfManageActivity
@@ -44,8 +48,12 @@ import io.legado.app.utils.startActivityForBook
 import io.legado.app.utils.statusBarHeight
 import io.legado.app.utils.toastOnUi
 import io.legado.app.utils.viewbindingdelegate.viewBinding
+import kotlinx.coroutines.Dispatchers.IO
+import kotlinx.coroutines.Dispatchers.Main
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.collections.set
@@ -106,6 +114,8 @@ class BookshelfFragment1() : BaseBookshelfFragment(R.layout.fragment_bookshelf1)
     private var configuredTopBarStyle by mutableStateOf(
         AppConfig.bookshelfTopBarStyle
     )
+    private var isTranslatingBooks by mutableStateOf(false)
+    private var bookshelfTranslateJob: Job? = null
     override val groupId: Long get() = selectedGroup?.groupId ?: 0
 
     override val books: List<Book>
@@ -119,6 +129,58 @@ class BookshelfFragment1() : BaseBookshelfFragment(R.layout.fragment_bookshelf1)
         pendingGroupSelection = true
         initView()
         initBookGroupData()
+    }
+
+    private fun translateCurrentBooksOnce() {
+        if (bookshelfTranslateJob?.isActive == true) {
+            bookshelfTranslateJob?.cancel()
+            bookshelfTranslateJob = null
+            isTranslatingBooks = false
+            return
+        }
+        val visibleBooks = if (showGroupGrid) {
+            groupGridBooks
+        } else {
+            fragmentMap[groupId]?.currentBooks() ?: books
+        }
+        if (visibleBooks.isEmpty()) return
+        val namesToTranslate = visibleBooks.asSequence()
+            .filter { book ->
+                BookTitleTranslator.resolveBookDisplayName(book.bookUrl, book.name) == book.name &&
+                    BookTitleTranslator.needsTranslation(book.name)
+            }
+            .map { it.name }
+            .distinct()
+            .toList()
+        if (namesToTranslate.isEmpty()) {
+            toastOnUi("当前列表已全部翻译")
+            return
+        }
+        isTranslatingBooks = true
+        bookshelfTranslateJob = viewLifecycleOwner.lifecycleScope.launch(IO) {
+            try {
+                BookTitleTranslator.withTranslationSession {
+                    namesToTranslate.chunked(15).forEach { batch ->
+                        val translated = BookTitleTranslator.translateBatch(batch)
+                        if (translated.isNotEmpty()) {
+                            visibleBooks.forEach { book ->
+                                translated[book.name]?.let { translatedTitle ->
+                                    TranslateHistoryStore.recordBookTitle(
+                                        bookKey = book.bookUrl,
+                                        originalTitle = book.name,
+                                        translatedTitle = translatedTitle,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            } finally {
+                withContext(Main) {
+                    isTranslatingBooks = false
+                }
+            }
+        }
     }
 
     private val selectedGroup: BookGroup?
@@ -156,6 +218,8 @@ class BookshelfFragment1() : BaseBookshelfFragment(R.layout.fragment_bookshelf1)
                     dockContentTopInsetPx = dockContentTopInsetPx,
                     dockTransparency = dockTransparency,
                     dockSearchPosition = dockSearchPosition,
+                    isTranslating = isTranslatingBooks,
+                    onTranslateBooks = ::translateCurrentBooksOnce,
                     onSearchClick = {
                         SearchActivity.start(requireContext(), null)
                     },

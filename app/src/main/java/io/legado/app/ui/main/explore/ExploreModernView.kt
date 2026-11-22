@@ -54,7 +54,6 @@ import io.legado.app.data.entities.SearchBook
 import io.legado.app.data.entities.rule.ExploreKind
 import io.legado.app.help.source.BookSourceReachability
 import io.legado.app.help.source.BookSourceReachabilityStore
-import io.legado.app.help.translate.TranslateConfig
 import io.legado.app.ui.book.explore.ExploreCategoryGlyph
 import io.legado.app.ui.book.explore.ExplorePageJumpDialog
 import io.legado.app.ui.book.explore.ExploreShowContentCard
@@ -80,7 +79,7 @@ internal data class ExploreModernUiState(
     val firstLoadedPage: Int = 1,
     val lastLoadedPage: Int = 0,
     val selectionRevision: Long = 0L,
-    val autoTranslateEnabled: Boolean = TranslateConfig.enabled,
+    val isTranslating: Boolean = false,
     val translatedNames: Map<String, String> = emptyMap(),
     val bookshelfKeys: Set<String> = emptySet(),
     val isKindsLoading: Boolean = false,
@@ -91,6 +90,10 @@ internal data class ExploreModernUiState(
     val kindsError: String? = null,
     val contentError: String? = null,
     val layoutMode: ExploreShowLayoutMode = ExploreShowLayoutMode.LIST,
+    val canSearch: Boolean = false,
+    val searchInput: String = "",
+    val activeSearchQuery: String = "",
+    val isSearchMode: Boolean = false,
 )
 
 @Composable
@@ -114,9 +117,11 @@ internal fun ExploreModernView(
     onOpenBook: (SearchBook) -> Unit,
     onShowError: (String) -> Unit,
     onSourceAction: (BookSourcePart, Int) -> Unit,
+    onCurrentPageChanged: (Int) -> Unit = {},
 ) {
     var pagePickerPage by rememberSaveable { mutableStateOf<Int?>(null) }
-    val showUiState = remember(state) {
+    val searchHeaderLabel = stringResource(R.string.search)
+    val showUiState = remember(state, searchHeaderLabel) {
         ExploreShowUiState(
             source = state.source,
             sourceName = state.sourceName,
@@ -124,7 +129,7 @@ internal fun ExploreModernView(
             selectedKind = state.selectedKind,
             books = state.books,
             translatedNames = state.translatedNames,
-            autoTranslateEnabled = state.autoTranslateEnabled,
+            isTranslating = state.isTranslating,
             bookPages = state.bookPages,
             bookshelfKeys = state.bookshelfKeys,
             isKindsLoading = state.isKindsLoading,
@@ -137,6 +142,8 @@ internal fun ExploreModernView(
             lastLoadedPage = state.lastLoadedPage,
             hasMore = state.hasMore,
             selectionRevision = state.selectionRevision,
+            isSearchMode = state.isSearchMode,
+            headerLabelOverride = if (state.isSearchMode) searchHeaderLabel else null,
         )
     }
 
@@ -168,6 +175,7 @@ internal fun ExploreModernView(
             onRetryContent = onRetryContent,
             onOpenBook = onOpenBook,
             onShowError = onShowError,
+            onCurrentPageChanged = onCurrentPageChanged,
             modifier = Modifier.fillMaxSize(),
             cardBottomPadding = (bottomInset + 4.dp).coerceAtLeast(8.dp),
             bottomContentPadding = 16.dp,

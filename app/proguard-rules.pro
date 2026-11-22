@@ -186,3 +186,10 @@ cn.hutool.core.util.**{*;}
 
 # EdDSA 的 JDK X509Key 兼容分支在 Android 不可用；应用使用 EdDSAPublicKey 校验签名。
 -dontwarn sun.security.x509.X509Key
+
+# ONNX Runtime & Google ML Kit Translate & Tencent HY-MT1.5 JNI
+-keep class ai.onnxruntime.** { *; }
+-dontwarn ai.onnxruntime.**
+-keep class com.google.mlkit.** { *; }
+-dontwarn com.google.mlkit.**
+-keep class io.legado.app.help.translate.HyMtNative { *; }

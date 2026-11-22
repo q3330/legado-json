@@ -1,6 +1,7 @@
 package io.legado.app.ui.main.explore
 
 import android.graphics.Color as AndroidColor
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
@@ -115,9 +116,13 @@ internal fun ExploreScreen(
     onModernLoadMore: () -> Unit,
     onModernJumpToPage: (Int) -> Unit,
     onModernRetryContent: () -> Unit,
-    onModernToggleAutoTranslate: () -> Unit,
+    onModernTranslateBooks: () -> Unit,
     onModernLayoutModeChange: (io.legado.app.ui.book.explore.ExploreShowLayoutMode) -> Unit,
     onModernOpenBook: (SearchBook) -> Unit,
+    onModernSearchQueryChange: (String) -> Unit,
+    onModernSearchSubmit: (String) -> Unit,
+    onModernExitSearch: () -> Unit,
+    onModernCurrentPageChange: (Int) -> Unit = {},
     onQueryChange: (String) -> Unit,
     onGroupSelected: (String?) -> Unit,
     onTypeSelected: (Int?) -> Unit,
@@ -135,13 +140,17 @@ internal fun ExploreScreen(
     var categoriesExpanded by remember(modernState.selectedSourceUrl) { mutableStateOf(false) }
     var categoryAnchorX by remember { mutableStateOf<Float?>(null) }
 
+    BackHandler(enabled = modernStyle && modernState.isSearchMode && !categoriesExpanded && !sourcePickerVisible) {
+        onModernExitSearch()
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding()
     ) {
         ExploreTopBar(
-            query = query,
+            query = if (modernStyle) modernState.searchInput else query,
             groups = groups,
             selectedGroup = selectedGroup,
             selectedType = selectedType,
@@ -149,14 +158,19 @@ internal fun ExploreScreen(
             modernStyle = modernStyle,
             currentSourceUrl = modernState.selectedSourceUrl,
             currentSourceName = modernState.sourceName,
-            autoTranslateEnabled = modernState.autoTranslateEnabled,
+            searchEnabled = modernState.canSearch,
+            isTranslating = modernState.isTranslating,
             categoriesExpanded = categoriesExpanded,
             onOpenSourcePicker = { sourcePickerVisible = true },
-            onToggleAutoTranslate = onModernToggleAutoTranslate,
+            onTranslateBooks = onModernTranslateBooks,
             onToggleCategories = { categoriesExpanded = !categoriesExpanded },
             onCategoryAnchorPosition = { categoryAnchorX = it },
             onToggleModernStyle = onToggleModernStyle,
-            onQueryChange = onQueryChange,
+            onQueryChange = if (modernStyle) onModernSearchQueryChange else onQueryChange,
+            onSearch = { q ->
+                categoriesExpanded = false
+                onModernSearchSubmit(q)
+            },
             onGroupSelected = onGroupSelected,
             onTypeSelected = onTypeSelected,
             onLayoutModeChange = onLayoutModeChange,
@@ -199,6 +213,7 @@ internal fun ExploreScreen(
                     onOpenBook = onModernOpenBook,
                     onShowError = onShowError,
                     onSourceAction = onSourceAction,
+                    onCurrentPageChanged = onModernCurrentPageChange,
                 )
             } else {
                 when (layoutMode) {

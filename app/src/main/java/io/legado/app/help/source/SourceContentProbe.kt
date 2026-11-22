@@ -149,7 +149,7 @@ internal object SourceContentProbe {
                 val cl = resp.header("Content-Length")?.toLongOrNull()
                 when {
                     resp.code in 200..299 && cl != 0L -> evaluate(resp.code, ct, cl, true)
-                    resp.code == 405 || resp.code == 403 || resp.code == 400 || resp.code == 501 || cl == 0L -> null
+                    resp.code == 405 || resp.code == 404 || resp.code == 403 || resp.code == 400 || resp.code == 501 || cl == 0L -> null
                     else -> evaluate(resp.code, ct, cl, false)
                 }
             }

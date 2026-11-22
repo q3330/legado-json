@@ -1208,6 +1208,7 @@ class AiChatClient {
                 val contentBuilder = StringBuilder()
                 val reasoningBuilder = StringBuilder()
                 val toolCalls = linkedMapOf<Int, StreamToolCall>()
+                val messageExtraFields = linkedMapOf<String, JsonElement>()
                 responseBody.charStream().buffered().useLines { lines ->
                     lines.forEach { line ->
                         currentCoroutineContext().ensureActive()
@@ -1263,6 +1264,16 @@ class AiChatClient {
                                     toolCall.arguments.append(arguments)
                                 }
                             }
+                            obj.entrySet().forEach { (key, value) ->
+                                if (key !in STREAM_TOOL_CALL_CORE_KEYS && !value.isJsonNull) {
+                                    mergeExtraJsonField(toolCall.extraFields, key, value)
+                                }
+                            }
+                        }
+                        delta.entrySet().forEach { (key, value) ->
+                            if (key !in STREAM_DELTA_CORE_KEYS && key != reasoningKey && !value.isJsonNull) {
+                                mergeExtraJsonField(messageExtraFields, key, value)
+                            }
                         }
                         if ((!deferVisibleContent && contentDelta.isNotEmpty()) || !reasoningDelta.isNullOrEmpty()) {
                             onStreamUpdate(
@@ -1294,6 +1305,11 @@ class AiChatClient {
                     reasoning?.let { value -> addProperty("reasoning_content", value) }
                     if (toolCallArray.size() > 0) {
                         add("tool_calls", toolCallArray)
+                    }
+                    messageExtraFields.forEach { (key, value) ->
+                        if (!has(key)) {
+                            add(key, value.deepCopy())
+                        }
                     }
                 }
                 ChatCompletionSnapshot(
@@ -1617,6 +1633,7 @@ class AiChatClient {
         var type: String = "function"
         var name: String = ""
         val arguments: StringBuilder = StringBuilder()
+        val extraFields: LinkedHashMap<String, JsonElement> = linkedMapOf()
 
         fun toJson(): JsonObject {
             return JsonObject().apply {
@@ -1626,11 +1643,44 @@ class AiChatClient {
                     addProperty("name", name)
                     addProperty("arguments", arguments.toString())
                 })
+                extraFields.forEach { (key, value) ->
+                    if (!has(key)) {
+                        add(key, value.deepCopy())
+                    }
+                }
+            }
+        }
+    }
+
+    private fun mergeExtraJsonField(
+        target: MutableMap<String, JsonElement>,
+        key: String,
+        incoming: JsonElement
+    ) {
+        val existing = target[key]
+        if (existing != null && existing.isJsonObject && incoming.isJsonObject) {
+            mergeJsonObjectsDeep(existing.asJsonObject, incoming.asJsonObject)
+        } else {
+            target[key] = incoming.deepCopy()
+        }
+    }
+
+    private fun mergeJsonObjectsDeep(target: JsonObject, incoming: JsonObject) {
+        incoming.entrySet().forEach { (key, value) ->
+            if (value.isJsonNull) return@forEach
+            val existing = target.get(key)
+            if (existing != null && existing.isJsonObject && value.isJsonObject) {
+                mergeJsonObjectsDeep(existing.asJsonObject, value.asJsonObject)
+            } else {
+                target.add(key, value.deepCopy())
             }
         }
     }
 
     companion object {
+
+        private val STREAM_TOOL_CALL_CORE_KEYS = setOf("index", "id", "type", "function")
+        private val STREAM_DELTA_CORE_KEYS = setOf("role", "content", "reasoning_content", "reasoning", "tool_calls")
 
         private const val CONTEXT_COMPACTION_PROMPT_ASSET = "ai/context_compaction.md"
         private const val AGENT_RUNTIME_NOTICE_PREFIX = "[AI_RUNTIME_NOTICE]"

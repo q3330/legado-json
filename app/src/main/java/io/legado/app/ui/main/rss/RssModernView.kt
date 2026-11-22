@@ -86,6 +86,10 @@ internal data class RssModernUiState(
     val loadingMore: Boolean = false,
     val hasMore: Boolean = true,
     val loadError: String? = null,
+    val canSearch: Boolean = false,
+    val searchInput: String = "",
+    val activeSearchQuery: String = "",
+    val isSearchMode: Boolean = false,
 )
 
 @Composable
@@ -130,7 +134,7 @@ internal fun RssModernView(
         RssShowContentCard(
             sourceKey = selectedSource?.sourceName.orEmpty(),
             sorts = state.sorts,
-            selectedSort = state.selectedSortIndex,
+            selectedSort = if (state.isSearchMode) -1 else state.selectedSortIndex,
             articles = state.articles,
             articleStyle = state.articleStyle,
             currentPage = state.page,
@@ -170,6 +174,7 @@ internal fun RssModernView(
             cardBottomPadding = (bottomInset + 4.dp).coerceAtLeast(8.dp),
             bottomContentPadding = 16.dp,
             useNavigationBarsPadding = false,
+            headerLabelOverride = if (state.isSearchMode) stringResource(R.string.search) else null,
         )
     }
 

@@ -48,17 +48,17 @@ import io.legado.app.help.gsyVideo.VideoDownloadStatus
 import io.legado.app.help.gsyVideo.VideoPlaybackBridge
 import io.legado.app.help.gsyVideo.VideoPlaybackState
 import io.legado.app.help.translate.BookTitleTranslator
-import io.legado.app.help.translate.TranslateConfig
 import io.legado.app.help.translate.TranslateHistoryStore
 import io.legado.app.model.VideoPlay
-import io.legado.app.ui.book.explore.ExploreToolbarButton
 import io.legado.app.ui.design.components.NgDialogVariant
 import io.legado.app.ui.design.components.compose.*
 import io.legado.app.ui.design.theme.NgTheme
 import io.legado.app.utils.ConvertUtils
 import io.legado.app.utils.toastOnUi
 import kotlinx.coroutines.Dispatchers.IO
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
 
@@ -106,14 +106,18 @@ fun VideoPlayerScreen(
     var hint by remember { mutableStateOf<String?>(null) }
 
     val bookUrl = remember(revision) { VideoPlay.book?.bookUrl }
-    var translateEnabled by remember(bookUrl) {
-        mutableStateOf(
-            if (bookUrl != null) TranslateConfig.isBookTranslateEnabled(bookUrl)
-            else TranslateConfig.enabled
-        )
+    val cacheRevision by BookTitleTranslator.cacheRevision.collectAsState()
+    val historyBooks by TranslateHistoryStore.booksFlow.collectAsState()
+    val scope = rememberCoroutineScope()
+    val translatedMap = remember(bookUrl) { mutableStateMapOf<String, String>() }
+    var isTranslating by remember(bookUrl) { mutableStateOf(false) }
+    var translateJob by remember(bookUrl) { mutableStateOf<Job?>(null) }
+    DisposableEffect(bookUrl) {
+        onDispose {
+            translateJob?.cancel()
+            translateJob = null
+        }
     }
-    val translatedMap = remember { mutableStateMapOf<String, String>() }
-    var translatedIntro by remember(bookUrl) { mutableStateOf<String?>(null) }
 
     val rawTitle = remember(revision, state.title) {
         VideoPlay.book?.name ?: VideoPlay.videoTitle ?: state.title
@@ -130,9 +134,47 @@ fun VideoPlayerScreen(
     }
     val hasCatalog = VideoPlay.book != null
 
-    // 自动翻译视频名称、剧集名称、线路名称与简介
-    LaunchedEffect(translateEnabled, rawTitle, rawEpisodeTitle, volumes, episodes, catalog, revision) {
-        if (!translateEnabled) return@LaunchedEffect
+    val translatedIntro = remember(bookUrl, revision, cacheRevision, historyBooks, translatedMap.size) {
+        val rawIntro = VideoPlay.book?.getDisplayIntro().orEmpty()
+        if (rawIntro.isBlank() ||
+            rawIntro.startsWith("<useweb>") ||
+            rawIntro.startsWith("<usehtml>") ||
+            rawIntro.startsWith("<md>")
+        ) {
+            null
+        } else {
+            TranslateHistoryStore.findOfflineBookIntro(bookUrl, rawIntro)
+                ?: translatedMap[rawIntro]
+                ?: BookTitleTranslator.getCached(rawIntro)
+        }
+    }
+
+    val translateText: (String) -> String = remember(bookUrl, cacheRevision, historyBooks, translatedMap.size) {
+        { origin: String ->
+            if (origin.isBlank()) {
+                origin
+            } else if (rawTitle != null && origin == rawTitle) {
+                translatedMap[origin] ?: BookTitleTranslator.resolveBookDisplayName(bookUrl, origin)
+            } else {
+                translatedMap[origin] ?: BookTitleTranslator.getCached(origin) ?: origin
+            }
+        }
+    }
+
+    val displayTitle = remember(rawTitle, cacheRevision, historyBooks, translatedMap[rawTitle]) {
+        rawTitle?.let(translateText).orEmpty()
+    }
+    val displayEpisodeTitle = remember(rawEpisodeTitle, cacheRevision, historyBooks, translatedMap[rawEpisodeTitle]) {
+        translateText(rawEpisodeTitle)
+    }
+
+    fun translateVideoOnce() {
+        if (translateJob?.isActive == true) {
+            translateJob?.cancel()
+            translateJob = null
+            isTranslating = false
+            return
+        }
         val candidates = buildList {
             if (!rawTitle.isNullOrBlank()) add(rawTitle)
             if (rawEpisodeTitle.isNotBlank()) add(rawEpisodeTitle)
@@ -143,74 +185,64 @@ fun VideoPlayerScreen(
                 g.items.forEach { if (it.chapter.title.isNotBlank()) add(it.chapter.title) }
             }
         }.distinct()
-
         candidates.forEach { text ->
-            BookTitleTranslator.getCached(text)?.let { cached ->
-                translatedMap[text] = cached
+            val cached = if (rawTitle != null && text == rawTitle) {
+                BookTitleTranslator.resolveBookDisplayName(bookUrl, text).takeIf { it != text }
+            } else {
+                BookTitleTranslator.getCached(text)
             }
+            if (cached != null) translatedMap[text] = cached
         }
         val uncached = candidates.filter {
             it !in translatedMap && BookTitleTranslator.needsTranslation(it)
         }
-        if (uncached.isNotEmpty()) {
-            uncached.chunked(25).forEach { batch ->
-                val result = withContext(IO) { BookTitleTranslator.translateBatch(batch) }
-                if (result.isNotEmpty()) {
-                    translatedMap.putAll(result)
-                    if (bookUrl != null && !rawTitle.isNullOrBlank()) {
-                        result[rawTitle]?.let { tr ->
-                            TranslateHistoryStore.recordBookTitle(bookUrl, rawTitle, tr)
-                        }
-                    }
-                }
-            }
-        }
-
         val rawIntro = VideoPlay.book?.getDisplayIntro().orEmpty()
-        if (rawIntro.isNotBlank() &&
+        val needIntro = rawIntro.isNotBlank() &&
             !rawIntro.startsWith("<useweb>") &&
             !rawIntro.startsWith("<usehtml>") &&
             !rawIntro.startsWith("<md>") &&
-            TranslateConfig.translateIntro
-        ) {
-            val cachedIntro = BookTitleTranslator.getCached(rawIntro)
-            if (!cachedIntro.isNullOrBlank()) {
-                translatedIntro = cachedIntro
-            } else if (BookTitleTranslator.needsTranslation(rawIntro)) {
-                val trIntro = withContext(IO) { BookTitleTranslator.translateText(rawIntro) }
-                if (!trIntro.isNullOrBlank()) {
-                    translatedIntro = trIntro
+            TranslateHistoryStore.findOfflineBookIntro(bookUrl, rawIntro) == null &&
+            BookTitleTranslator.getCached(rawIntro) == null &&
+            BookTitleTranslator.needsTranslation(rawIntro)
+        if (uncached.isEmpty() && !needIntro) {
+            context.toastOnUi("当前内容已全部翻译")
+            return
+        }
+        isTranslating = true
+        translateJob = scope.launch {
+            try {
+                BookTitleTranslator.withTranslationSession {
+                    uncached.chunked(25).forEach { batch ->
+                        val result = withContext(IO) { BookTitleTranslator.translateBatch(batch) }
+                        if (result.isNotEmpty()) {
+                            translatedMap.putAll(result)
+                            if (bookUrl != null && !rawTitle.isNullOrBlank()) {
+                                result[rawTitle]?.let { tr ->
+                                    TranslateHistoryStore.recordBookTitle(bookUrl, rawTitle, tr)
+                                }
+                            }
+                        }
+                    }
+                    if (needIntro) {
+                        val trIntro = withContext(IO) { BookTitleTranslator.translateText(rawIntro) }
+                        if (!trIntro.isNullOrBlank()) {
+                            translatedMap[rawIntro] = trIntro
+                            if (bookUrl != null) {
+                                TranslateHistoryStore.recordBookIntro(
+                                    bookKey = bookUrl,
+                                    originalTitle = rawTitle.orEmpty(),
+                                    translatedTitle = translatedMap[rawTitle] ?: rawTitle,
+                                    originalIntro = rawIntro,
+                                    translatedIntro = trIntro,
+                                )
+                            }
+                        }
+                    }
                 }
+            } finally {
+                isTranslating = false
             }
         }
-    }
-
-    val translateText: (String) -> String = remember(translateEnabled, translatedMap) {
-        { origin: String ->
-            if (translateEnabled && origin.isNotBlank()) {
-                translatedMap[origin] ?: BookTitleTranslator.getCached(origin) ?: origin
-            } else {
-                origin
-            }
-        }
-    }
-
-    val displayTitle = remember(rawTitle, translateEnabled, translatedMap[rawTitle]) {
-        rawTitle?.let(translateText).orEmpty()
-    }
-    val displayEpisodeTitle = remember(rawEpisodeTitle, translateEnabled, translatedMap[rawEpisodeTitle]) {
-        translateText(rawEpisodeTitle)
-    }
-
-    fun toggleTranslate() {
-        val next = !translateEnabled
-        translateEnabled = next
-        if (bookUrl != null) {
-            TranslateConfig.setBookTranslateEnabled(bookUrl, next)
-        } else {
-            TranslateConfig.enabled = next
-        }
-        context.toastOnUi(if (next) "已开启自动翻译" else "已关闭自动翻译")
     }
 
     fun openEpisodes(volume: Int = VideoPlay.durVolumeIndex) {
@@ -312,16 +344,12 @@ fun VideoPlayerScreen(
                             )
                         }
                     }
-                    ExploreToolbarButton(
-                        iconRes = R.drawable.ic_translate,
-                        description = stringResource(R.string.explore_auto_translate),
-                        tint = if (translateEnabled) Color(NgTheme.colors.primary) else colorResource(R.color.ng_search_icon),
-                        onClick = ::toggleTranslate,
-                        modifier = Modifier.background(
-                            if (translateEnabled) Color(NgTheme.colors.primary).copy(alpha = 0.13f)
-                            else Color.Transparent,
-                            RoundedCornerShape(10.dp),
-                        ),
+                    NgToolbarTranslateButton(
+                        isTranslating = isTranslating,
+                        onClick = ::translateVideoOnce,
+                        contentDescription = "翻译当前内容",
+                        idleTint = colorResource(R.color.ng_search_icon),
+                        borderColor = colorResource(R.color.primaryText),
                     )
                     if (VideoPlay.rssRecord != null || VideoPlay.rssStar != null) {
                         Spacer(Modifier.width(2.dp))
@@ -454,16 +482,12 @@ fun VideoPlayerScreen(
                                     Spacer(Modifier.weight(1f))
                                 }
                                 if (!locked) {
-                                    ExploreToolbarButton(
-                                        iconRes = R.drawable.ic_translate,
-                                        description = stringResource(R.string.explore_auto_translate),
-                                        tint = if (translateEnabled) Color(NgTheme.colors.primary) else Color.White,
-                                        onClick = ::toggleTranslate,
-                                        modifier = Modifier.background(
-                                            if (translateEnabled) Color(NgTheme.colors.primary).copy(alpha = 0.22f)
-                                            else Color.Transparent,
-                                            RoundedCornerShape(10.dp),
-                                        ),
+                                    NgToolbarTranslateButton(
+                                        isTranslating = isTranslating,
+                                        onClick = ::translateVideoOnce,
+                                        contentDescription = "翻译当前内容",
+                                        idleTint = Color.White,
+                                        borderColor = Color.White,
                                     )
                                 }
                                 if (mode == VideoPresentation.IMMERSIVE && !locked) {
@@ -772,7 +796,7 @@ fun VideoPlayerScreen(
                                 },
                             )
                         } else {
-                            val displayIntroText = if (translateEnabled && !translatedIntro.isNullOrBlank()) {
+                            val displayIntroText = if (!translatedIntro.isNullOrBlank()) {
                                 translatedIntro!!
                             } else {
                                 rawIntroText
@@ -902,8 +926,8 @@ fun VideoPlayerScreen(
             onSelect = onEpisode,
             onDismiss = { panel = "" },
             translateTitle = translateText,
-            translateEnabled = translateEnabled,
-            onToggleTranslate = ::toggleTranslate,
+            isTranslating = isTranslating,
+            onToggleTranslate = ::translateVideoOnce,
             downloadStates = downloadStates,
             episodeCacheKey = { VideoDownloadCache.cacheKey(VideoPlay.book, it, null) },
             onDownloadEpisode = ::triggerEpisodeDownload,

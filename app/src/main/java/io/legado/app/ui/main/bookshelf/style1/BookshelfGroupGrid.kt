@@ -253,6 +253,7 @@ private fun BookshelfGroupFolderDialog(
         showBookName = profile.showBookName,
         screenHeight = screenHeight,
     )
+    val resolveDisplayName = rememberBookshelfBookDisplayNames(folder.books)
 
     NgVisualOverlayDialog(
         onDismissRequest = onDismiss,
@@ -281,6 +282,7 @@ private fun BookshelfGroupFolderDialog(
         } else {
             BookshelfFolderBookGrid(
                 books = folder.books,
+                displayNameOf = resolveDisplayName,
                 columns = profile.innerColumns,
                 showBookName = profile.showBookName,
                 coverRadius = profile.coverRadius,
@@ -332,6 +334,7 @@ private fun BookshelfFolderEmptyState(
 @Composable
 private fun BookshelfFolderBookGrid(
     books: List<Book>,
+    displayNameOf: (Book) -> String,
     columns: Int,
     showBookName: Int,
     coverRadius: Int,
@@ -351,6 +354,7 @@ private fun BookshelfFolderBookGrid(
         items(books, key = { it.bookUrl }) { book ->
             BookshelfFolderGridBookItem(
                 book = book,
+                displayName = displayNameOf(book),
                 showBookName = showBookName,
                 coverRadius = coverRadius,
                 spacing = spacing,
@@ -365,6 +369,7 @@ private fun BookshelfFolderBookGrid(
 @Composable
 private fun BookshelfFolderGridBookItem(
     book: Book,
+    displayName: String,
     showBookName: Int,
     coverRadius: Int,
     spacing: Int,
@@ -390,7 +395,7 @@ private fun BookshelfFolderGridBookItem(
             )
             if (showBookName == 2) {
                 Text(
-                    text = book.name,
+                    text = displayName,
                     color = Color.White,
                     fontSize = 11.sp,
                     lineHeight = 14.sp,
@@ -408,7 +413,7 @@ private fun BookshelfFolderGridBookItem(
         if (showBookName == 0) {
             Spacer(Modifier.height(6.dp))
             Text(
-                text = book.name,
+                text = displayName,
                 color = Color(NgTheme.colors.onSurface),
                 fontSize = 12.sp,
                 lineHeight = 15.sp,
@@ -424,6 +429,7 @@ private fun BookshelfFolderGridBookItem(
 @Composable
 private fun BookshelfFolderBookList(
     books: List<Book>,
+    displayNameOf: (Book) -> String,
     compact: Boolean,
     onOpenBook: (Book) -> Unit,
     onOpenBookInfo: (Book) -> Unit,
@@ -436,6 +442,7 @@ private fun BookshelfFolderBookList(
         lazyItems(books, key = { it.bookUrl }) { book ->
             BookshelfFolderListBookItem(
                 book = book,
+                displayName = displayNameOf(book),
                 compact = compact,
                 onClick = { onOpenBook(book) },
                 onLongClick = { onOpenBookInfo(book) },
@@ -448,6 +455,7 @@ private fun BookshelfFolderBookList(
 @Composable
 private fun BookshelfFolderListBookItem(
     book: Book,
+    displayName: String,
     compact: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
@@ -478,7 +486,7 @@ private fun BookshelfFolderListBookItem(
             verticalArrangement = Arrangement.Center,
         ) {
             Text(
-                text = book.name,
+                text = displayName,
                 color = Color(NgTheme.colors.onSurface),
                 fontSize = if (compact) 14.sp else 15.sp,
                 lineHeight = 19.sp,

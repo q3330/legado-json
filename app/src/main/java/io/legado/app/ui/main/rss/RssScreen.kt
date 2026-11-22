@@ -1,6 +1,7 @@
 package io.legado.app.ui.main.rss
 
 import android.widget.ImageView
+import androidx.activity.compose.BackHandler
 import androidx.appcompat.widget.AppCompatImageView
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
@@ -74,6 +75,9 @@ internal fun RssScreen(
     onModernJumpToPage: (Int) -> Unit,
     onModernSelectLayoutStyle: (Int) -> Unit,
     onModernOpenArticle: (RssArticle) -> Unit,
+    onModernSearchQueryChange: (String) -> Unit,
+    onModernSearchSubmit: (String) -> Unit,
+    onModernExitSearch: () -> Unit,
     onQueryChange: (String) -> Unit,
     onGroupSelected: (String?) -> Unit,
     onOpenRuleSubscription: () -> Unit,
@@ -91,24 +95,33 @@ internal fun RssScreen(
         sources.firstOrNull { it.sourceUrl == modernState.selectedSourceUrl } ?: sources.firstOrNull()
     }
 
+    BackHandler(enabled = modernStyle && modernState.isSearchMode && !categoriesExpanded && !sourcePickerVisible) {
+        onModernExitSearch()
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding()
     ) {
         RssTopBar(
-            query = query,
+            query = if (modernStyle) modernState.searchInput else query,
             groups = groups,
             selectedGroup = selectedGroup,
             modernStyle = modernStyle,
             currentSourceUrl = selectedModernSource?.sourceUrl,
             currentSourceName = selectedModernSource?.sourceName.orEmpty(),
+            searchEnabled = modernState.canSearch,
             categoriesExpanded = categoriesExpanded,
             onOpenSourcePicker = { sourcePickerVisible = true },
             onToggleCategories = { categoriesExpanded = !categoriesExpanded },
             onCategoryAnchorPosition = { categoryAnchorX = it },
             onToggleModernStyle = onToggleModernStyle,
-            onQueryChange = onQueryChange,
+            onQueryChange = if (modernStyle) onModernSearchQueryChange else onQueryChange,
+            onSearch = { q ->
+                categoriesExpanded = false
+                onModernSearchSubmit(q)
+            },
             onGroupSelected = onGroupSelected,
             onOpenFavorites = onOpenFavorites,
             onOpenSourceManage = onOpenSourceManage

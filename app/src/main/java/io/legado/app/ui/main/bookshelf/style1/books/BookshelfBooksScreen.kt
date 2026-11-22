@@ -87,6 +87,7 @@ import io.legado.app.ui.main.bookshelf.BookshelfGridBackground
 import io.legado.app.ui.main.bookshelf.bookshelfAuthorText
 import io.legado.app.ui.main.bookshelf.bookshelfReadingProgress
 import io.legado.app.ui.main.bookshelf.bookshelfReadingProgressPercent
+import io.legado.app.ui.main.bookshelf.style1.rememberBookshelfBookDisplayNames
 import io.legado.app.utils.toTimeAgo
 import java.text.NumberFormat
 import java.util.Locale
@@ -133,6 +134,7 @@ internal fun BookshelfBooksScreen(
         }
     }
     val cardBottomPadding = (bottomInset + 4.dp).coerceAtLeast(8.dp)
+    val resolveDisplayName = rememberBookshelfBookDisplayNames(books)
 
     NgGlassSurface(
         modifier = Modifier
@@ -189,6 +191,7 @@ internal fun BookshelfBooksScreen(
                             BookshelfLayoutMode.LIST,
                             BookshelfLayoutMode.COMPACT -> BookshelfBookList(
                                 books = books,
+                                displayNameOf = resolveDisplayName,
                                 compact = layoutMode == BookshelfLayoutMode.COMPACT,
                                 highlightUnread = showUnread && highlightUnread,
                                 spacing = spacing,
@@ -207,6 +210,7 @@ internal fun BookshelfBooksScreen(
 
                             BookshelfLayoutMode.GRID -> BookshelfBookGrid(
                                 books = books,
+                                displayNameOf = resolveDisplayName,
                                 columns = columns,
                                 spacing = spacing,
                                 showBookName = showBookName,
@@ -234,6 +238,7 @@ internal fun BookshelfBooksScreen(
 @Composable
 private fun BookshelfBookList(
     books: List<Book>,
+    displayNameOf: (Book) -> String,
     compact: Boolean,
     highlightUnread: Boolean,
     spacing: Int,
@@ -298,6 +303,7 @@ private fun BookshelfBookList(
             ) {
                 BookshelfListBookItem(
                     book = book,
+                    displayName = displayNameOf(book),
                     appearance = appearance,
                     compact = compact,
                     highlightUnread = highlightUnread,
@@ -319,6 +325,7 @@ private fun BookshelfBookList(
 @Composable
 private fun BookshelfListBookItem(
     book: Book,
+    displayName: String,
     appearance: BookshelfCardStyle,
     compact: Boolean,
     highlightUnread: Boolean,
@@ -404,7 +411,7 @@ private fun BookshelfListBookItem(
                         .padding(start = BookshelfListDetailsGap, bottom = extraDetailsInset),
                 ) {
                     Text(
-                        text = book.name,
+                        text = displayName,
                         color = titleColor,
                         fontSize = 16.sp,
                         lineHeight = 19.sp,
@@ -466,7 +473,7 @@ private fun BookshelfListBookItem(
                     verticalArrangement = Arrangement.Center,
                 ) {
                     Text(
-                        text = book.name,
+                        text = displayName,
                         color = titleColor,
                         fontSize = 16.sp,
                         lineHeight = 19.sp,
@@ -673,6 +680,7 @@ private fun BookshelfSummaryIcon(
 @Composable
 private fun BookshelfBookGrid(
     books: List<Book>,
+    displayNameOf: (Book) -> String,
     columns: Int,
     spacing: Int,
     showBookName: Int,
@@ -714,6 +722,7 @@ private fun BookshelfBookGrid(
             val rowIndex = index / spanCount
             BookshelfGridBookItem(
                 book = book,
+                displayName = displayNameOf(book),
                 modifier = Modifier.animateItem(),
                 itemPadding = PaddingValues(
                     start = itemSpacing,
@@ -737,6 +746,7 @@ private fun BookshelfBookGrid(
 @Composable
 private fun BookshelfGridBookItem(
     book: Book,
+    displayName: String,
     modifier: Modifier = Modifier,
     itemPadding: PaddingValues,
     showBookName: Int,
@@ -782,8 +792,8 @@ private fun BookshelfGridBookItem(
                     modifier = Modifier.fillMaxSize(),
                 )
                 if (showBookName == 2) {
-                    val verticalBookName = remember(book.name) {
-                        book.name.codePoints().toArray()
+                    val verticalBookName = remember(displayName) {
+                        displayName.codePoints().toArray()
                             .joinToString("\n") { String(Character.toChars(it)) }
                     }
                     Text(
@@ -830,7 +840,7 @@ private fun BookshelfGridBookItem(
         if (showBookName == 0) {
             Spacer(Modifier.height(6.dp))
             Text(
-                text = book.name,
+                text = displayName,
                 color = colorResource(R.color.primaryText),
                 fontSize = 12.sp,
                 lineHeight = 15.sp,

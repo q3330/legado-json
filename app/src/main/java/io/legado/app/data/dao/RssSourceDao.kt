@@ -5,6 +5,7 @@ import androidx.room.Delete
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import androidx.room.Update
 import io.legado.app.constant.AppPattern
 import io.legado.app.data.entities.RssSource
@@ -17,6 +18,35 @@ import kotlinx.coroutines.flow.map
 
 @Dao
 interface RssSourceDao {
+
+    data class RssSourceGroupEntry(
+        val sourceUrl: String,
+        val sourceGroup: String?,
+    )
+
+    @Query("select sourceUrl, sourceGroup from rssSources where trim(sourceGroup) <> ''")
+    fun allGroupEntries(): List<RssSourceGroupEntry>
+
+    @Query(
+        """update rssSources
+        set sourceGroup = :group
+        where sourceGroup is null or trim(sourceGroup) = '' or sourceGroup like '%未分组%'"""
+    )
+    fun assignGroupToNoGroup(group: String)
+
+    @Query("update rssSources set sourceGroup = :sourceGroup where sourceUrl in (:urls)")
+    fun updateGroupByUrls(sourceGroup: String?, urls: List<String>)
+
+    @Transaction
+    fun upGroupBatch(updates: Map<String?, List<String>>) {
+        updates.forEach { (newGroup, urls) ->
+            if (urls.isNotEmpty()) {
+                urls.chunked(500).forEach { chunk ->
+                    updateGroupByUrls(newGroup, chunk)
+                }
+            }
+        }
+    }
 
     @Query("select * from rssSources where sourceUrl = :key")
     fun getByKey(key: String): RssSource?

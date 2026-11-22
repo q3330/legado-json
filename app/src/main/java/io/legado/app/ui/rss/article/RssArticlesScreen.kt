@@ -37,12 +37,15 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -65,7 +68,7 @@ import io.legado.app.R
 import io.legado.app.data.entities.RssArticle
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.translate.BookTitleTranslator
-import io.legado.app.help.translate.TranslateConfig
+import io.legado.app.help.translate.TranslateHistoryStore
 import io.legado.app.ui.book.explore.ExploreCategoryBubbleShape
 import io.legado.app.ui.book.explore.ExploreCategoryGlyph
 import io.legado.app.ui.book.explore.ExploreLayoutButton
@@ -86,12 +89,15 @@ import io.legado.app.ui.design.components.compose.NgPopupToggleState
 import io.legado.app.ui.design.components.compose.NgPullRefreshBox
 import io.legado.app.ui.design.components.compose.NgSearchBar
 import io.legado.app.ui.design.components.compose.NgSearchBarVariant
+import io.legado.app.ui.design.components.compose.NgToolbarTranslateButton
 import io.legado.app.ui.design.theme.NgTheme
 import io.legado.app.ui.main.explore.sourceTileColor
 import io.legado.app.ui.main.explore.sourceTileContentColor
 import io.legado.app.ui.rss.RssEmptyState
 import io.legado.app.ui.rss.RssRemoteImage
 import kotlinx.coroutines.Dispatchers.IO
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 internal fun rssArticleStyleToLayoutMode(articleStyle: Int): ExploreShowLayoutMode =
@@ -426,6 +432,7 @@ internal fun RssShowContentCard(
     cardBottomPadding: Dp = 8.dp,
     bottomContentPadding: Dp = 24.dp,
     useNavigationBarsPadding: Boolean = true,
+    headerLabelOverride: String? = null,
 ) {
     var categoryPanelLeft by remember { mutableStateOf(0f) }
     val categoryCorner = NgTheme.shapes.mediumDp.dp
@@ -437,27 +444,69 @@ internal fun RssShowContentCard(
     val categoryPanelVisible = categoryVisibility.currentState || categoryVisibility.targetState
     BackHandler(enabled = categoriesExpanded) { onCategoriesExpandedChange(false) }
 
+    val cacheRevision by BookTitleTranslator.cacheRevision.collectAsState()
+    val scope = rememberCoroutineScope()
     val translatedSortLabels = remember(sourceKey) { mutableStateMapOf<String, String>() }
-    val autoTranslate = TranslateConfig.enabled
-    LaunchedEffect(autoTranslate, sorts) {
-        if (!autoTranslate) return@LaunchedEffect
-        val labels = sorts.map { it.first.trim() }.filter { it.isNotBlank() }.distinct()
-        labels.forEach { label ->
-            BookTitleTranslator.getCached(label)?.let { translatedSortLabels[label] = it }
+    var isTranslatingCategories by remember(sourceKey) { mutableStateOf(false) }
+    var categoryTranslateJob by remember(sourceKey) { mutableStateOf<Job?>(null) }
+    DisposableEffect(sourceKey) {
+        onDispose {
+            categoryTranslateJob?.cancel()
+            categoryTranslateJob = null
         }
-        val uncached = labels.filter { it !in translatedSortLabels && BookTitleTranslator.needsTranslation(it) }
-        if (uncached.isNotEmpty()) {
-            uncached.chunked(25).forEach { batch ->
-                val result = withContext(IO) { BookTitleTranslator.translateBatch(batch) }
-                if (result.isNotEmpty()) {
-                    translatedSortLabels.putAll(result)
+    }
+    val allSortLabels = remember(sorts) {
+        sorts.map { it.first.trim() }.filter { it.isNotBlank() }.distinct()
+    }
+    LaunchedEffect(allSortLabels, cacheRevision) {
+        allSortLabels.forEach { label ->
+            val cached = BookTitleTranslator.getCached(label)
+            if (cached != null) {
+                translatedSortLabels[label] = cached
+            } else {
+                translatedSortLabels.remove(label)
+            }
+        }
+    }
+    val onTranslateCategories: () -> Unit = {
+        if (categoryTranslateJob?.isActive == true) {
+            categoryTranslateJob?.cancel()
+            categoryTranslateJob = null
+            isTranslatingCategories = false
+        } else {
+            val cachedNow = buildMap {
+                allSortLabels.forEach { label ->
+                    BookTitleTranslator.getCached(label)?.let { put(label, it) }
+                }
+            }
+            if (cachedNow.isNotEmpty()) {
+                translatedSortLabels.putAll(cachedNow)
+            }
+            val uncached = allSortLabels.filter {
+                it !in translatedSortLabels && BookTitleTranslator.needsTranslation(it)
+            }
+            if (uncached.isNotEmpty()) {
+                isTranslatingCategories = true
+                categoryTranslateJob = scope.launch {
+                    try {
+                        BookTitleTranslator.withTranslationSession {
+                            uncached.chunked(25).forEach { batch ->
+                                val result = withContext(IO) { BookTitleTranslator.translateBatch(batch) }
+                                if (result.isNotEmpty()) {
+                                    translatedSortLabels.putAll(result)
+                                }
+                            }
+                        }
+                    } finally {
+                        isTranslatingCategories = false
+                    }
                 }
             }
         }
     }
     val translateSortLabel: (String) -> String = { raw ->
         val clean = raw.trim()
-        if (autoTranslate && clean.isNotBlank()) {
+        if (clean.isNotBlank()) {
             translatedSortLabels[clean] ?: BookTitleTranslator.getCached(clean) ?: clean
         } else {
             clean
@@ -469,7 +518,7 @@ internal fun RssShowContentCard(
 
     val rawSortLabel = sorts.getOrNull(selectedSort)?.first?.takeIf { it.isNotBlank() }
         ?: sourceKey.ifBlank { "全部" }
-    val selectedSortLabel = translateSortLabel(rawSortLabel)
+    val selectedSortLabel = headerLabelOverride ?: translateSortLabel(rawSortLabel)
     val layoutMode = remember(articleStyle) { rssArticleStyleToLayoutMode(articleStyle) }
     val gridState = rememberLazyGridState()
     var pagePickerPage by rememberSaveable { mutableStateOf<Int?>(null) }
@@ -581,7 +630,7 @@ internal fun RssShowContentCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .then(if (useNavigationBarsPadding) Modifier.navigationBarsPadding() else Modifier)
-                    .padding(start = 14.dp, end = 14.dp, bottom = 4.dp)
+                    .padding(start = 14.dp, end = 14.dp, bottom = cardBottomPadding)
                     .onGloballyPositioned { categoryPanelLeft = it.boundsInRoot().left }
                     .pointerInput(Unit) { detectTapGestures { } },
                 role = NgMaterialRole.CONTROL,
@@ -601,6 +650,8 @@ internal fun RssShowContentCard(
                         categoryLayoutMode = next
                         AppConfig.exploreCategoryLayoutMode = next.value
                     },
+                    isTranslatingCategories = isTranslatingCategories,
+                    onTranslateCategories = onTranslateCategories,
                     translateSortLabel = translateSortLabel,
                     onSelectSort = { index ->
                         onSortSelected(index)
@@ -721,6 +772,8 @@ internal fun RssCategoryPanel(
     selectedSort: Int,
     categoryLayoutMode: ExploreShowLayoutMode = ExploreShowLayoutMode.GRID_4,
     onCategoryLayoutModeChange: (ExploreShowLayoutMode) -> Unit = {},
+    isTranslatingCategories: Boolean = false,
+    onTranslateCategories: () -> Unit = {},
     translateSortLabel: (String) -> String = { it },
     onSelectSort: (Int) -> Unit,
 ) {
@@ -749,6 +802,17 @@ internal fun RssCategoryPanel(
                 fontWeight = FontWeight.Medium,
                 maxLines = 1,
             )
+            NgToolbarTranslateButton(
+                isTranslating = isTranslatingCategories,
+                onClick = onTranslateCategories,
+                contentDescription = "翻译分类",
+                size = 32.dp,
+                iconSize = 16.dp,
+                cornerRadius = 9.dp,
+                idleTint = colorResource(R.color.secondaryText),
+                borderColor = colorResource(R.color.primaryText),
+            )
+            Spacer(Modifier.width(2.dp))
             ExploreLayoutModePopupButton(
                 layoutMode = categoryLayoutMode,
                 onLayoutModeChange = onCategoryLayoutModeChange,

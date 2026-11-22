@@ -306,7 +306,8 @@ fun NgSearchBar(
     allowLiquidGlass: Boolean = true,
     hideHintOnFocus: Boolean = true,
     onFocusChanged: (Boolean) -> Unit = {},
-    onSearch: (String) -> Unit = {}
+    onSearch: (String) -> Unit = {},
+    onSearchIconClick: (() -> Unit)? = null,
 ) {
     val isToolbar = variant == NgSearchBarVariant.TOOLBAR
     val isLegacyCompact = variant == NgSearchBarVariant.COMPACT ||
@@ -386,6 +387,7 @@ fun NgSearchBar(
                 Row(
                     modifier = Modifier
                         .fillMaxSize()
+                        .alpha(if (enabled) 1f else 0.52f)
                         .padding(
                             start = if (isToolbar) 14.dp else 16.dp,
                             end = if (isToolbar) 6.dp else 8.dp
@@ -395,7 +397,21 @@ fun NgSearchBar(
                     Icon(
                         painter = searchIcon,
                         contentDescription = stringResource(R.string.search),
-                        modifier = Modifier.size(if (isToolbar) 20.dp else 22.dp),
+                        modifier = Modifier
+                            .size(if (isToolbar) 20.dp else 22.dp)
+                            .then(
+                                if (onSearchIconClick != null && enabled) {
+                                    Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable(
+                                            enabled = enabled,
+                                            role = Role.Button,
+                                            onClick = onSearchIconClick,
+                                        )
+                                } else {
+                                    Modifier
+                                }
+                            ),
                         tint = iconColor
                     )
                     Spacer(Modifier.width(if (isToolbar) 8.dp else 10.dp))
@@ -459,7 +475,7 @@ fun NgSearchBar(
 }
 
 @Composable
-private fun rememberNgSearchSurfaceStyle(
+internal fun rememberNgSearchSurfaceStyle(
     containerColor: Color,
     strokeColor: Color,
     contentColor: Color,

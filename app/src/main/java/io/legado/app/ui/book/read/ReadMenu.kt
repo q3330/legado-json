@@ -6,6 +6,7 @@ import android.database.ContentObserver
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.PorterDuff
+import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.provider.Settings
 import android.util.AttributeSet
@@ -28,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.compose.ui.unit.dp
 import androidx.constraintlayout.widget.ConstraintLayout
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.isGone
 import androidx.core.view.isVisible
@@ -45,7 +47,6 @@ import io.legado.app.help.config.ReadFloatingToolSettings
 import io.legado.app.help.coroutine.Coroutine
 import io.legado.app.help.source.getSourceType
 import io.legado.app.help.translate.BookTitleTranslator
-import io.legado.app.help.translate.TranslateConfig
 import io.legado.app.model.ReadBook
 import io.legado.app.model.SourceCallBack
 import io.legado.app.ui.book.read.config.showReadConfirmDialog
@@ -59,6 +60,7 @@ import io.legado.app.ui.design.theme.NgThemeSnapshot
 import io.legado.app.ui.widget.NgActionPopup
 import io.legado.app.ui.widget.NgActionPopupItem
 import io.legado.app.ui.widget.NgIconActionPopup
+import io.legado.app.ui.widget.RotatingBorderDrawable
 import io.legado.app.ui.widget.seekbar.SeekBarChangeListener
 import io.legado.app.utils.activity
 import io.legado.app.utils.applyNavigationBarPadding
@@ -131,6 +133,9 @@ class ReadMenu @JvmOverloads constructor(
     )
 
     private var textColor: Int = readMenuThemeSnapshot.colors.onSurface
+    private var isTranslating = false
+    private var translateBorderDrawable: RotatingBorderDrawable? = null
+    private var defaultTranslateBg: Drawable? = null
 
     private var onMenuOutEnd: (() -> Unit)? = null
     private val showFloatingTools
@@ -593,6 +598,8 @@ class ReadMenu @JvmOverloads constructor(
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
+        BookTitleTranslator.removeModelLoadingListener(modelLoadingListener)
+        translateBorderDrawable?.stop()
         contentObserver?.let {
             context.contentResolver.unregisterContentObserver(it)
             contentObserver = null
@@ -838,11 +845,45 @@ class ReadMenu @JvmOverloads constructor(
         menuTopOut.setAnimationListener(menuOutListener)
     }
 
+    private val modelLoadingListener: () -> Unit = {
+        if (isTranslating) {
+            updateTranslateIconState()
+        }
+    }
+
     fun updateTranslateIconState() {
-        val enabled = TranslateConfig.isBookContentTranslateEnabled(ReadBook.book?.bookUrl)
-        binding.ivHeaderTranslate.setColorFilter(
-            if (enabled) readMenuThemeSnapshot.colors.primary else textColor
-        )
+        if (defaultTranslateBg == null) {
+            defaultTranslateBg = binding.ivHeaderTranslate.background
+        }
+        if (isTranslating) {
+            binding.ivHeaderTranslate.setColorFilter(
+                ContextCompat.getColor(context, R.color.ng_success)
+            )
+            val drawable = translateBorderDrawable ?: RotatingBorderDrawable(
+                cornerRadiusPx = 10.dpToPx().toFloat(),
+                strokeWidthPx = 1.6f * resources.displayMetrics.density,
+                color = textColor,
+            ).also { translateBorderDrawable = it }
+            drawable.setBorderColor(textColor)
+            drawable.setReverse(BookTitleTranslator.isLoadingModel.value)
+            binding.ivHeaderTranslate.background = drawable
+            drawable.start()
+        } else {
+            translateBorderDrawable?.stop()
+            binding.ivHeaderTranslate.background = defaultTranslateBg
+            binding.ivHeaderTranslate.setColorFilter(textColor)
+        }
+    }
+
+    fun setTranslating(translating: Boolean) {
+        if (isTranslating == translating) return
+        isTranslating = translating
+        if (translating) {
+            BookTitleTranslator.addModelLoadingListener(modelLoadingListener)
+        } else {
+            BookTitleTranslator.removeModelLoadingListener(modelLoadingListener)
+        }
+        updateTranslateIconState()
     }
 
     fun upBookView() {
@@ -851,24 +892,10 @@ class ReadMenu @JvmOverloads constructor(
         updateTranslateIconState()
         val book = ReadBook.book
         val originName = book?.name.orEmpty()
-        if (book != null && TranslateConfig.isBookTranslateEnabled(book.bookUrl)) {
-            val cached = BookTitleTranslator.getCached(originName)
-            binding.tvBookTitle.text = cached ?: originName
-            if (cached == null && BookTitleTranslator.needsTranslation(originName)) {
-                val targetUrl = book.bookUrl
-                Coroutine.async {
-                    BookTitleTranslator.translateText(originName)
-                }.onSuccess { translated ->
-                    if (!translated.isNullOrBlank() &&
-                        ReadBook.book?.bookUrl == targetUrl &&
-                        TranslateConfig.isBookTranslateEnabled(targetUrl)
-                    ) {
-                        binding.tvBookTitle.text = translated
-                    }
-                }
-            }
+        binding.tvBookTitle.text = if (book != null) {
+            BookTitleTranslator.resolveBookDisplayName(book.bookUrl, originName)
         } else {
-            binding.tvBookTitle.text = originName
+            originName
         }
         val sourceName = ReadBook.bookSource?.bookSourceName
             ?: ReadBook.book?.originName

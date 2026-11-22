@@ -37,7 +37,9 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -77,6 +79,7 @@ import io.legado.app.data.entities.rule.ExploreKind
 import io.legado.app.data.entities.rule.ExploreKind.Type
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.translate.BookTitleTranslator
+import io.legado.app.help.translate.TranslateHistoryStore
 import io.legado.app.ui.book.search.SearchBookCover
 import io.legado.app.ui.book.search.SearchCoverBitmapCache
 import io.legado.app.ui.book.search.SearchResultCard
@@ -91,6 +94,7 @@ import io.legado.app.ui.design.components.compose.NgGlassSurface
 import io.legado.app.ui.design.components.compose.NgMaterialRole
 import io.legado.app.ui.design.components.compose.NgFloatingToolbarBackButton
 import io.legado.app.ui.design.components.compose.NgPullRefreshBox
+import io.legado.app.ui.design.components.compose.NgToolbarTranslateButton
 import io.legado.app.ui.design.theme.NgTheme
 import io.legado.app.ui.main.explore.rememberExploreSourceJsExtensions
 import io.legado.app.ui.main.explore.exploreDropdownMenuBounds
@@ -101,6 +105,7 @@ import io.legado.app.ui.main.explore.sourceTileColor
 import io.legado.app.ui.main.explore.sourceTileContentColor
 import io.legado.app.utils.InfoMap
 import kotlinx.coroutines.Dispatchers.IO
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -113,7 +118,7 @@ internal fun ExploreShowScreen(
     layoutMode: ExploreShowLayoutMode,
     onBack: () -> Unit,
     onRefresh: () -> Unit,
-    onToggleAutoTranslate: () -> Unit,
+    onTranslateBooks: () -> Unit,
     onRefreshKinds: () -> Unit,
     onSelectKind: (ExploreKind) -> Unit,
     onLayoutModeChange: (ExploreShowLayoutMode) -> Unit,
@@ -122,7 +127,8 @@ internal fun ExploreShowScreen(
     onLoadNext: () -> Unit,
     onRetryContent: () -> Unit,
     onOpenBook: (SearchBook) -> Unit,
-    onShowError: (String) -> Unit
+    onShowError: (String) -> Unit,
+    onCurrentPageChanged: (Int) -> Unit = {},
 ) {
     var categoriesExpanded by rememberSaveable(state.source?.bookSourceUrl) { mutableStateOf(false) }
     var categoryAnchorX by remember { mutableStateOf<Float?>(null) }
@@ -144,9 +150,9 @@ internal fun ExploreShowScreen(
             ExploreShowTopBar(
                 sourceName = state.sourceName,
                 isLoading = state.isKindsLoading && !state.isRefreshing,
-                autoTranslateEnabled = state.autoTranslateEnabled,
+                isTranslating = state.isTranslating,
                 onBack = onBack,
-                onToggleAutoTranslate = onToggleAutoTranslate,
+                onTranslateBooks = onTranslateBooks,
                 onRefresh = onRefresh,
                 categoriesExpanded = categoriesExpanded,
                 onToggleCategories = { categoriesExpanded = !categoriesExpanded },
@@ -168,6 +174,7 @@ internal fun ExploreShowScreen(
                 onRetryContent = onRetryContent,
                 onOpenBook = onOpenBook,
                 onShowError = onShowError,
+                onCurrentPageChanged = onCurrentPageChanged,
                 modifier = Modifier.weight(1f)
             )
         }
@@ -194,6 +201,7 @@ internal fun ExploreShowContentCard(
     cardBottomPadding: Dp = 8.dp,
     bottomContentPadding: Dp = 24.dp,
     useNavigationBarsPadding: Boolean = true,
+    onCurrentPageChanged: (Int) -> Unit = {},
 ) {
     val kindSections = remember(state.kinds) { buildExploreKindSections(state.kinds) }
     val activeSectionIndex = kindSections.sectionIndexFor(state.selectedKind)
@@ -203,12 +211,22 @@ internal fun ExploreShowContentCard(
         } else {
             kindSections.sections
         }
+    val cacheRevision by BookTitleTranslator.cacheRevision.collectAsState()
+    val historyBooks by TranslateHistoryStore.booksFlow.collectAsState()
+    val scope = rememberCoroutineScope()
     val translatedCategoryLabels = remember(state.source?.bookSourceUrl) {
         mutableStateMapOf<String, String>()
     }
-    LaunchedEffect(state.autoTranslateEnabled, state.kinds, state.selectedKind) {
-        if (!state.autoTranslateEnabled) return@LaunchedEffect
-        val labels = buildList {
+    var isTranslatingCategories by remember(state.source?.bookSourceUrl) { mutableStateOf(false) }
+    var categoryTranslateJob by remember(state.source?.bookSourceUrl) { mutableStateOf<Job?>(null) }
+    DisposableEffect(state.source?.bookSourceUrl) {
+        onDispose {
+            categoryTranslateJob?.cancel()
+            categoryTranslateJob = null
+        }
+    }
+    val allCategoryLabels = remember(state.kinds, state.selectedKind, kindSections) {
+        buildList {
             state.selectedKind?.title?.let(::sanitizeExploreDetailLabel)?.takeIf { it.isNotBlank() }?.let(::add)
             state.kinds.forEach { kind ->
                 sanitizeExploreDetailLabel(kind.title).takeIf { it.isNotBlank() }?.let(::add)
@@ -218,22 +236,56 @@ internal fun ExploreShowContentCard(
                     ?.takeIf { it.isNotBlank() }?.let(::add)
             }
         }.distinct()
-        labels.forEach { label ->
-            BookTitleTranslator.getCached(label)?.let { translatedCategoryLabels[label] = it }
+    }
+    LaunchedEffect(allCategoryLabels, cacheRevision) {
+        allCategoryLabels.forEach { label ->
+            val cached = BookTitleTranslator.getCached(label)
+            if (cached != null) {
+                translatedCategoryLabels[label] = cached
+            } else {
+                translatedCategoryLabels.remove(label)
+            }
         }
-        val uncached = labels.filter { it !in translatedCategoryLabels && BookTitleTranslator.needsTranslation(it) }
-        if (uncached.isNotEmpty()) {
-            uncached.chunked(25).forEach { batch ->
-                val result = withContext(IO) { BookTitleTranslator.translateBatch(batch) }
-                if (result.isNotEmpty()) {
-                    translatedCategoryLabels.putAll(result)
+    }
+    val onTranslateCategories: () -> Unit = {
+        if (categoryTranslateJob?.isActive == true) {
+            categoryTranslateJob?.cancel()
+            categoryTranslateJob = null
+            isTranslatingCategories = false
+        } else {
+            val cachedNow = buildMap {
+                allCategoryLabels.forEach { label ->
+                    BookTitleTranslator.getCached(label)?.let { put(label, it) }
+                }
+            }
+            if (cachedNow.isNotEmpty()) {
+                translatedCategoryLabels.putAll(cachedNow)
+            }
+            val uncached = allCategoryLabels.filter {
+                it !in translatedCategoryLabels && BookTitleTranslator.needsTranslation(it)
+            }
+            if (uncached.isNotEmpty()) {
+                isTranslatingCategories = true
+                categoryTranslateJob = scope.launch {
+                    try {
+                        BookTitleTranslator.withTranslationSession {
+                            uncached.chunked(25).forEach { batch ->
+                                val result = withContext(IO) { BookTitleTranslator.translateBatch(batch) }
+                                if (result.isNotEmpty()) {
+                                    translatedCategoryLabels.putAll(result)
+                                }
+                            }
+                        }
+                    } finally {
+                        isTranslatingCategories = false
+                    }
                 }
             }
         }
     }
     val translateCategoryLabel: (String) -> String = { raw ->
         val clean = sanitizeExploreDetailLabel(raw)
-        if (state.autoTranslateEnabled && clean.isNotBlank()) {
+        if (clean.isNotBlank()) {
             translatedCategoryLabels[clean] ?: BookTitleTranslator.getCached(clean) ?: clean
         } else {
             clean
@@ -248,7 +300,6 @@ internal fun ExploreShowContentCard(
     val controlRows = calculateExploreDetailKindRows(kindSections.controls)
     val gridState = rememberLazyGridState()
     val coverBitmapCache = remember { SearchCoverBitmapCache() }
-    val scope = rememberCoroutineScope()
     val currentPage by remember(gridState, state.bookPages, state.firstLoadedPage) {
         derivedStateOf {
             val visibleBooks = gridState.layoutInfo.visibleItemsInfo.mapNotNull { item ->
@@ -264,7 +315,11 @@ internal fun ExploreShowContentCard(
         }
     }
     val lastBookPage = remember(state.bookPages) { state.bookPages.values.maxOrNull() ?: 0 }
-    val navigationAvailable = state.selectedKind != null && !state.isContentLoading &&
+    LaunchedEffect(currentPage) {
+        onCurrentPageChanged(currentPage)
+    }
+    val hasActiveContentSource = state.selectedKind != null || state.isSearchMode
+    val navigationAvailable = hasActiveContentSource && !state.isContentLoading &&
             !state.isKindsLoading && !state.isRefreshing
     val navigate: (Int) -> Unit = { page ->
         if (navigationAvailable && !gridState.isScrollInProgress && page > 0) {
@@ -328,7 +383,7 @@ internal fun ExploreShowContentCard(
                 Spacer(Modifier.fillMaxWidth().height(44.5.dp))
             } else {
                 ExploreContentToolbar(
-                    selectedKindLabel = state.selectedKind?.title
+                    selectedKindLabel = state.headerLabelOverride ?: state.selectedKind?.title
                         ?.let(translateCategoryLabel)
                         .orEmpty(),
                     page = currentPage,
@@ -372,10 +427,9 @@ internal fun ExploreShowContentCard(
                         key = { "list_${it.bookUrl}" },
                         span = { GridItemSpan(maxLineSpan) }
                     ) { book ->
-                        val displayName = if (state.autoTranslateEnabled) {
-                            state.translatedNames[book.name] ?: book.name
-                        } else {
-                            book.name
+                        val displayName = remember(book.bookUrl, book.name, state.translatedNames, cacheRevision, historyBooks) {
+                            state.translatedNames[book.name]
+                                ?: BookTitleTranslator.resolveBookDisplayName(book.bookUrl, book.name)
                         }
                         val displayBook = if (displayName != book.name) {
                             book.copy(name = displayName)
@@ -411,10 +465,9 @@ internal fun ExploreShowContentCard(
                         items = state.books,
                         key = { "grid_${it.bookUrl}" }
                     ) { book ->
-                        val displayName = if (state.autoTranslateEnabled) {
-                            state.translatedNames[book.name] ?: book.name
-                        } else {
-                            book.name
+                        val displayName = remember(book.bookUrl, book.name, state.translatedNames, cacheRevision, historyBooks) {
+                            state.translatedNames[book.name]
+                                ?: BookTitleTranslator.resolveBookDisplayName(book.bookUrl, book.name)
                         }
                         ExploreBookGridCard(
                             book = book,
@@ -444,13 +497,13 @@ internal fun ExploreShowContentCard(
                         }
                     }
 
-                    state.selectedKind == null && !state.isKindsLoading -> {
+                    !hasActiveContentSource && !state.isKindsLoading -> {
                         item(span = { GridItemSpan(maxLineSpan) }) {
                             ExploreStatusRow(stringResource(R.string.explore_category_empty))
                         }
                     }
 
-                    state.books.isEmpty() && state.selectedKind != null -> {
+                    state.books.isEmpty() && hasActiveContentSource -> {
                         item(span = { GridItemSpan(maxLineSpan) }) {
                             ExploreStatusRow(stringResource(R.string.empty))
                         }
@@ -473,7 +526,7 @@ internal fun ExploreShowContentCard(
             NgGlassSurface(
                 modifier = Modifier.fillMaxWidth()
                     .then(if (useNavigationBarsPadding) Modifier.navigationBarsPadding() else Modifier)
-                    .padding(start = 14.dp, end = 14.dp, bottom = 4.dp)
+                    .padding(start = 14.dp, end = 14.dp, bottom = cardBottomPadding)
                     .onGloballyPositioned { categoryPanelLeft = it.boundsInRoot().left }
                     .pointerInput(Unit) { detectTapGestures { } },
                 role = NgMaterialRole.CONTROL,
@@ -495,6 +548,8 @@ internal fun ExploreShowContentCard(
                         categoryLayoutMode = next
                         AppConfig.exploreCategoryLayoutMode = next.value
                     },
+                    isTranslatingCategories = isTranslatingCategories,
+                    onTranslateCategories = onTranslateCategories,
                     translateCategoryLabel = translateCategoryLabel,
                     onSelectKind = onSelectKind,
                     onOpenKind = selectKind,
@@ -515,6 +570,8 @@ private fun ExploreCategoryPanel(
     activeSectionIndex: Int,
     categoryLayoutMode: ExploreShowLayoutMode,
     onCategoryLayoutModeChange: (ExploreShowLayoutMode) -> Unit,
+    isTranslatingCategories: Boolean,
+    onTranslateCategories: () -> Unit,
     translateCategoryLabel: (String) -> String,
     onSelectKind: (ExploreKind) -> Unit,
     onOpenKind: (ExploreKind) -> Unit,
@@ -574,6 +631,17 @@ private fun ExploreCategoryPanel(
                     maxLines = 1,
                 )
             }
+            NgToolbarTranslateButton(
+                isTranslating = isTranslatingCategories,
+                onClick = onTranslateCategories,
+                contentDescription = "翻译分类",
+                size = 32.dp,
+                iconSize = 16.dp,
+                cornerRadius = 9.dp,
+                idleTint = colorResource(R.color.secondaryText),
+                borderColor = colorResource(R.color.primaryText),
+            )
+            Spacer(Modifier.width(2.dp))
             ExploreLayoutModePopupButton(
                 layoutMode = categoryLayoutMode,
                 onLayoutModeChange = onCategoryLayoutModeChange,
@@ -702,9 +770,9 @@ private fun ExploreShowUiState.isBookInShelf(book: SearchBook): Boolean {
 private fun ExploreShowTopBar(
     sourceName: String,
     isLoading: Boolean,
-    autoTranslateEnabled: Boolean,
+    isTranslating: Boolean,
     onBack: () -> Unit,
-    onToggleAutoTranslate: () -> Unit,
+    onTranslateBooks: () -> Unit,
     onRefresh: () -> Unit,
     categoriesExpanded: Boolean,
     onToggleCategories: () -> Unit,
@@ -738,14 +806,12 @@ private fun ExploreShowTopBar(
                 overflow = TextOverflow.Ellipsis,
                 textAlign = TextAlign.Start
             )
-            ExploreToolbarButton(
-                iconRes = R.drawable.ic_translate,
-                description = stringResource(R.string.explore_auto_translate),
-                tint = if (autoTranslateEnabled) Color(NgTheme.colors.primary) else contentColor,
-                onClick = onToggleAutoTranslate,
-                modifier = Modifier.background(
-                    if (autoTranslateEnabled) Color(NgTheme.colors.primary).copy(alpha = 0.13f)
-                    else Color.Transparent, RoundedCornerShape(10.dp))
+            NgToolbarTranslateButton(
+                isTranslating = isTranslating,
+                onClick = onTranslateBooks,
+                contentDescription = "翻译当前列表书名",
+                idleTint = contentColor,
+                borderColor = colorResource(R.color.primaryText),
             )
             Spacer(Modifier.width(2.dp))
             ExploreToolbarButton(

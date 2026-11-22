@@ -20,6 +20,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
@@ -54,16 +56,20 @@ internal fun RssTopBar(
     modernStyle: Boolean,
     currentSourceUrl: String? = null,
     currentSourceName: String = "",
+    searchEnabled: Boolean = true,
     categoriesExpanded: Boolean = false,
     onOpenSourcePicker: () -> Unit = {},
     onToggleCategories: () -> Unit = {},
     onCategoryAnchorPosition: (Float) -> Unit = {},
     onToggleModernStyle: () -> Unit,
     onQueryChange: (String) -> Unit,
+    onSearch: (String) -> Unit = {},
     onGroupSelected: (String?) -> Unit,
     onOpenFavorites: () -> Unit,
     onOpenSourceManage: () -> Unit
 ) {
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
     val menuState = remember { NgPopupToggleState() }
     val menuItems = remember(groups, selectedGroup) {
         listOf(
@@ -124,17 +130,37 @@ internal fun RssTopBar(
             )
             Spacer(Modifier.width(spacerWidth))
         }
+        val effectiveSearchEnabled = !modernStyle || searchEnabled
+        val submitModernSearch: (String) -> Unit = { rawQuery ->
+            focusManager.clearFocus()
+            keyboardController?.hide()
+            if (modernStyle && searchEnabled) {
+                onSearch(rawQuery)
+            }
+        }
         NgSearchBar(
             query = query,
             onQueryChange = onQueryChange,
-            hint = if (modernStyle && currentSourceName.isNotBlank()) {
-                currentSourceName
-            } else {
-                stringResource(R.string.search_rss_source)
+            hint = when {
+                !modernStyle -> stringResource(R.string.search_rss_source)
+                !searchEnabled -> "当前源不支持搜索"
+                currentSourceName.isNotBlank() -> "搜索 $currentSourceName"
+                else -> stringResource(R.string.search)
             },
             modifier = Modifier.weight(1f),
+            enabled = effectiveSearchEnabled,
+            searchIcon = painterResource(
+                if (modernStyle && !searchEnabled) R.drawable.ic_lock_outline
+                else R.drawable.ic_search
+            ),
             variant = NgSearchBarVariant.TOOLBAR,
-            hideHintOnFocus = true
+            hideHintOnFocus = true,
+            onSearch = submitModernSearch,
+            onSearchIconClick = if (modernStyle && searchEnabled) {
+                { submitModernSearch(query) }
+            } else {
+                null
+            },
         )
         if (modernStyle) {
             Spacer(Modifier.width(spacerWidth))

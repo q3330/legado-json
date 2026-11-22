@@ -134,6 +134,7 @@ import io.noties.markwon.html.HtmlPlugin
 import io.noties.markwon.image.glide.GlideImagesPlugin
 import kotlinx.coroutines.Dispatchers.IO
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.catch
@@ -229,6 +230,7 @@ class BookInfoActivity :
     private val expandedOtherWorksKeys = linkedSetOf<String>()
     private val otherWorksTranslatedNames = hashMapOf<String, String>()
     private var otherWorksTranslateJob: Job? = null
+    private var bookHeaderTranslateJob: Job? = null
     private val book get() = viewModel.getBook(false)
 
     override val binding by viewBinding(ComposeActivityBinding::inflate)
@@ -344,27 +346,21 @@ class BookInfoActivity :
         viewModel.initData(intent)
     }
 
+    override fun onResume() {
+        super.onResume()
+        val current = viewModel.getBook(false) ?: return
+        applyBookHistoryTranslations(current)
+        showBookIntro(current)
+        updateOtherWorksUiItems()
+    }
+
     private fun handleUiEvent(event: BookInfoUiEvent) {
         when (event) {
             BookInfoUiEvent.Back -> onBackPressedDispatcher.onBackPressed()
             BookInfoUiEvent.Refresh -> refreshBook()
             BookInfoUiEvent.CustomButton -> clickCustomButton()
             BookInfoUiEvent.TranslateClick -> {
-                val current = viewModel.getBook(false) ?: return
-                val next = !TranslateConfig.isBookTranslateEnabled(current.bookUrl)
-                TranslateConfig.setBookTranslateEnabled(current.bookUrl, next)
-                uiState = uiState.copy(bookTranslateEnabled = next)
-                toastOnUi(if (next) "已开启自动翻译" else "已关闭自动翻译")
-                if (!next) {
-                    otherWorksTranslateJob?.cancel()
-                    uiState = uiState.copy(displayBookName = null, originalNameText = null)
-                    showBookIntro(current)
-                    updateOtherWorksUiItems()
-                } else {
-                    applyBookTitleTranslation(current)
-                    showBookIntro(current)
-                    updateOtherWorksUiItems()
-                }
+                translateBookInfoOnce()
             }
             is BookInfoUiEvent.Menu -> handleBookInfoMenuAction(event.action)
             BookInfoUiEvent.CoverClick -> changeCover()
@@ -673,28 +669,23 @@ class BookInfoActivity :
     private fun updateBookSnapshot(book: Book) {
         val bookChanged = uiState.book?.bookUrl != book.bookUrl
         if (bookChanged) {
+            bookHeaderTranslateJob?.cancel()
+            otherWorksTranslateJob?.cancel()
             otherWorksRawBooks = emptyList()
             otherWorksGroupCounts = emptyMap()
             otherWorksGroupPrimaryBookUrls = emptyMap()
             expandedOtherWorksKeys.clear()
+            uiState = uiState.copy(isTranslating = false)
         }
-        val bookTranslateEnabled = TranslateConfig.isBookTranslateEnabled(book.bookUrl)
-        val cachedTranslatedName = if (bookTranslateEnabled) {
-            BookTitleTranslator.getCached(book.name)
-        } else {
-            null
-        }
+        val resolvedBookName = BookTitleTranslator.resolveBookDisplayName(book.bookUrl, book.name)
+            .takeIf { it != book.name }
         uiState = uiState.copy(
             book = book.copy(),
-            displayBookName = cachedTranslatedName,
-            originalNameText = cachedTranslatedName?.let { getString(R.string.book_original_name_show, book.name) },
-            bookTranslateEnabled = bookTranslateEnabled,
+            displayBookName = resolvedBookName,
+            originalNameText = resolvedBookName?.let { getString(R.string.book_original_name_show, book.name) },
             tocText = if (bookChanged) getString(R.string.toc_s, getString(R.string.loading)) else uiState.tocText,
             originText = getString(R.string.origin_show, book.originName),
-            latestText = getString(
-                R.string.lasted_show,
-                if (book.isWebFile) "下载中..." else book.latestChapterTitle,
-            ),
+            latestText = formatLatestText(book),
             inBookshelf = viewModel.inBookshelf,
             hasCustomButton = viewModel.hasCustomBtn,
             sourceAvailable = viewModel.bookSource != null,
@@ -721,38 +712,187 @@ class BookInfoActivity :
             otherWorks = if (bookChanged) emptyList() else uiState.otherWorks,
             deleteAlertEnabled = LocalConfig.bookInfoDeleteAlert,
         )
-        if (bookTranslateEnabled && cachedTranslatedName == null) {
-            applyBookTitleTranslation(book)
-        }
     }
 
-    private fun applyBookTitleTranslation(book: Book) {
-        val cached = BookTitleTranslator.getCached(book.name)
-        if (!cached.isNullOrBlank()) {
-            uiState = uiState.copy(
-                displayBookName = cached,
-                originalNameText = getString(R.string.book_original_name_show, book.name),
-            )
+    private fun resolveHistoryOrCachedTitle(bookUrl: String, raw: String?): String? {
+        if (raw.isNullOrBlank()) return raw
+        return TranslateHistoryStore.findOfflineChapterTitle(bookUrl, null, raw)
+            ?: BookTitleTranslator.getCached(raw)
+            ?: raw
+    }
+
+    private fun formatLatestText(book: Book): String {
+        if (book.isWebFile) return getString(R.string.lasted_show, "下载中...")
+        val display = resolveHistoryOrCachedTitle(book.bookUrl, book.latestChapterTitle)
+        return getString(R.string.lasted_show, display)
+    }
+
+    private fun formatTocText(book: Book): String {
+        val display = resolveHistoryOrCachedTitle(book.bookUrl, book.durChapterTitle)
+        return getString(R.string.toc_s, display)
+    }
+
+    private fun applyBookHistoryTranslations(book: Book) {
+        val chaptersLoaded = !viewModel.currentChapterList().isNullOrEmpty()
+        val resolvedBookName = BookTitleTranslator.resolveBookDisplayName(book.bookUrl, book.name)
+            .takeIf { it != book.name }
+        uiState = uiState.copy(
+            displayBookName = resolvedBookName,
+            originalNameText = resolvedBookName?.let { getString(R.string.book_original_name_show, book.name) },
+            latestText = formatLatestText(book),
+            tocText = if (chaptersLoaded) formatTocText(book) else uiState.tocText,
+        )
+    }
+
+    private fun translateBookInfoOnce() {
+        if (bookHeaderTranslateJob?.isActive == true) {
+            bookHeaderTranslateJob?.cancel()
+            bookHeaderTranslateJob = null
+            uiState = uiState.copy(isTranslating = false)
             return
         }
-        if (!BookTitleTranslator.needsTranslation(book.name)) return
-        val targetBookUrl = book.bookUrl
-        val originBookName = book.name
-        lifecycleScope.launch {
-            val translated = BookTitleTranslator.translateText(originBookName)
-            if (!translated.isNullOrBlank() &&
-                viewModel.getBook(false)?.bookUrl == targetBookUrl &&
-                TranslateConfig.isBookTranslateEnabled(targetBookUrl)
+        val current = viewModel.getBook(false) ?: return
+        val targetBookUrl = current.bookUrl
+        applyBookHistoryTranslations(current)
+        showBookIntro(current)
+        updateOtherWorksUiItems()
+
+        val chaptersLoaded = !viewModel.currentChapterList().isNullOrEmpty()
+        val originBookName = current.name
+        val latestTitle = current.latestChapterTitle?.takeIf { !current.isWebFile && it.isNotBlank() }
+        val tocTitle = if (chaptersLoaded) current.durChapterTitle?.takeIf { it.isNotBlank() } else null
+
+        val headerToTranslate = buildList {
+            if (BookTitleTranslator.resolveBookDisplayName(targetBookUrl, originBookName) == originBookName &&
+                BookTitleTranslator.needsTranslation(originBookName)
             ) {
-                TranslateHistoryStore.recordBookTitle(
-                    bookKey = targetBookUrl,
-                    originalTitle = originBookName,
-                    translatedTitle = translated,
-                )
-                uiState = uiState.copy(
-                    displayBookName = translated,
-                    originalNameText = getString(R.string.book_original_name_show, originBookName),
-                )
+                add(originBookName)
+            }
+            if (latestTitle != null &&
+                TranslateHistoryStore.findOfflineChapterTitle(targetBookUrl, null, latestTitle) == null &&
+                BookTitleTranslator.getCached(latestTitle) == null &&
+                BookTitleTranslator.needsTranslation(latestTitle)
+            ) {
+                add(latestTitle)
+            }
+            if (tocTitle != null &&
+                TranslateHistoryStore.findOfflineChapterTitle(targetBookUrl, null, tocTitle) == null &&
+                BookTitleTranslator.getCached(tocTitle) == null &&
+                BookTitleTranslator.needsTranslation(tocTitle)
+            ) {
+                add(tocTitle)
+            }
+        }.distinct()
+
+        val rawIntro = current.getDisplayIntro()?.trim().orEmpty()
+        val introToTranslate = rawIntro.takeIf {
+            TranslateConfig.translateIntro &&
+                it.isNotBlank() &&
+                !it.startsWith("<useweb>") &&
+                !it.startsWith("<usehtml>") &&
+                !it.startsWith("<md>") &&
+                TranslateHistoryStore.findOfflineBookIntro(targetBookUrl, it) == null &&
+                BookTitleTranslator.getCached(it) == null &&
+                BookTitleTranslator.needsTranslation(it)
+        }
+
+        val otherWorksSnapshot = otherWorksRawBooks.toList()
+        val otherWorksToTranslate = otherWorksSnapshot.map { it.name }.distinct().filter { name ->
+            name !in otherWorksTranslatedNames &&
+                BookTitleTranslator.getCached(name) == null &&
+                BookTitleTranslator.needsTranslation(name)
+        }
+
+        if (headerToTranslate.isEmpty() && introToTranslate == null && otherWorksToTranslate.isEmpty()) {
+            toastOnUi("当前书籍信息已全部翻译")
+            return
+        }
+
+        uiState = uiState.copy(isTranslating = true)
+        bookHeaderTranslateJob = lifecycleScope.launch {
+            try {
+                BookTitleTranslator.withTranslationSession {
+                    coroutineScope {
+                        if (headerToTranslate.isNotEmpty()) {
+                            launch(IO) {
+                                val translatedMap = BookTitleTranslator.translateBatch(headerToTranslate)
+                                if (translatedMap.isNotEmpty()) {
+                                    val latestBook = viewModel.getBook(false)
+                                    if (latestBook != null && latestBook.bookUrl == targetBookUrl) {
+                                        val translatedBookName = translatedMap[latestBook.name]
+                                            ?: BookTitleTranslator.resolveBookDisplayName(targetBookUrl, latestBook.name)
+                                                .takeIf { it != latestBook.name }
+                                        if (!translatedBookName.isNullOrBlank()) {
+                                            TranslateHistoryStore.recordBookTitle(
+                                                bookKey = targetBookUrl,
+                                                originalTitle = latestBook.name,
+                                                translatedTitle = translatedBookName,
+                                            )
+                                        }
+                                        withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                            if (viewModel.getBook(false)?.bookUrl == targetBookUrl) {
+                                                applyBookHistoryTranslations(latestBook)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (introToTranslate != null) {
+                            launch(IO) {
+                                val translatedIntro = BookTitleTranslator.translateText(introToTranslate)
+                                if (!translatedIntro.isNullOrBlank()) {
+                                    val titleForRecord = BookTitleTranslator.resolveBookDisplayName(
+                                        targetBookUrl,
+                                        current.name,
+                                    ).takeIf { it != current.name }
+                                    TranslateHistoryStore.recordBookIntro(
+                                        bookKey = targetBookUrl,
+                                        originalTitle = current.name,
+                                        translatedTitle = titleForRecord,
+                                        originalIntro = introToTranslate,
+                                        translatedIntro = translatedIntro,
+                                    )
+                                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                        if (viewModel.getBook(false)?.bookUrl == targetBookUrl &&
+                                            uiState.introRenderMode == BookInfoIntroRenderMode.TEXT
+                                        ) {
+                                            introTextView.text = translatedIntro
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (otherWorksToTranslate.isNotEmpty()) {
+                            launch(IO) {
+                                otherWorksToTranslate.chunked(20).forEach { batch ->
+                                    val translatedMap = BookTitleTranslator.translateBatch(batch)
+                                    if (translatedMap.isNotEmpty()) {
+                                        otherWorksTranslatedNames.putAll(translatedMap)
+                                        otherWorksSnapshot.forEach { otherBook ->
+                                            translatedMap[otherBook.name]?.let { tr ->
+                                                TranslateHistoryStore.recordBookTitle(
+                                                    bookKey = otherBook.bookUrl,
+                                                    originalTitle = otherBook.name,
+                                                    translatedTitle = tr,
+                                                )
+                                            }
+                                        }
+                                        withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                            if (viewModel.getBook(false)?.bookUrl == targetBookUrl) {
+                                                updateOtherWorksUiItems()
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } finally {
+                uiState = uiState.copy(isTranslating = false)
             }
         }
     }
@@ -844,63 +984,20 @@ class BookInfoActivity :
 
     private fun updateOtherWorksUiItems() {
         val items = buildOtherWorksItems()
-        val translateOn = uiState.bookTranslateEnabled
         uiState = uiState.copy(
             otherWorks = items.map { otherBook ->
-                val translated = if (translateOn) {
-                    otherWorksTranslatedNames[otherBook.name] ?: BookTitleTranslator.getCached(otherBook.name)
-                } else {
-                    null
-                }
+                val resolved = otherWorksTranslatedNames[otherBook.name]
+                    ?: BookTitleTranslator.resolveBookDisplayName(otherBook.bookUrl, otherBook.name)
+                        .takeIf { it != otherBook.name }
                 BookInfoOtherWorkUiItem(
                     book = otherBook,
                     inBookshelf = viewModel.isInBookShelf(otherBook),
                     originCount = otherWorksGroupCount(otherBook),
                     canExpand = canExpandOtherWorks(otherBook),
-                    displayTitle = translated,
+                    displayTitle = resolved,
                 )
             },
         )
-        if (translateOn && items.isNotEmpty()) {
-            translateOtherWorksTitles(items)
-        }
-    }
-
-    private fun translateOtherWorksTitles(items: List<SearchBook>) {
-        val pending = items.map { it.name }.distinct().filter { name ->
-            name !in otherWorksTranslatedNames &&
-                BookTitleTranslator.getCached(name) == null &&
-                BookTitleTranslator.needsTranslation(name)
-        }
-        if (pending.isEmpty()) return
-        otherWorksTranslateJob?.cancel()
-        val targetBookUrl = viewModel.getBook(false)?.bookUrl ?: return
-        otherWorksTranslateJob = lifecycleScope.launch {
-            pending.chunked(20).forEach { batch ->
-                if (!uiState.bookTranslateEnabled || viewModel.getBook(false)?.bookUrl != targetBookUrl) {
-                    return@launch
-                }
-                val translatedMap = withContext(IO) {
-                    BookTitleTranslator.translateBatch(batch)
-                }
-                if (translatedMap.isNotEmpty()) {
-                    otherWorksTranslatedNames.putAll(translatedMap)
-                    if (uiState.bookTranslateEnabled && viewModel.getBook(false)?.bookUrl == targetBookUrl) {
-                        uiState = uiState.copy(
-                            otherWorks = uiState.otherWorks.map { item ->
-                                val tr = otherWorksTranslatedNames[item.book.name]
-                                    ?: BookTitleTranslator.getCached(item.book.name)
-                                if (tr != null && tr != item.displayTitle) {
-                                    item.copy(displayTitle = tr)
-                                } else {
-                                    item
-                                }
-                            },
-                        )
-                    }
-                }
-            }
-        }
     }
 
     private fun observeCharacterPreview(book: Book) {
@@ -1224,35 +1321,9 @@ class BookInfoActivity :
                 )
             }
         } else {
-            val shouldTranslateIntro = TranslateConfig.isBookTranslateEnabled(book.bookUrl) &&
-                TranslateConfig.translateIntro
-            val cachedIntro = if (shouldTranslateIntro) {
-                BookTitleTranslator.getCached(intro)
-            } else {
-                null
-            }
+            val cachedIntro = TranslateHistoryStore.findOfflineBookIntro(book.bookUrl, intro)
+                ?: BookTitleTranslator.getCached(intro)
             tvIntro.text = cachedIntro ?: intro
-            if (shouldTranslateIntro &&
-                cachedIntro == null && BookTitleTranslator.needsTranslation(intro)
-            ) {
-                lifecycleScope.launch {
-                    val translated = BookTitleTranslator.translateText(intro)
-                    if (!translated.isNullOrBlank() &&
-                        webIntroLoadGeneration == textIntroGeneration &&
-                        uiState.introRenderMode == BookInfoIntroRenderMode.TEXT &&
-                        TranslateConfig.isBookTranslateEnabled(book.bookUrl)
-                    ) {
-                        TranslateHistoryStore.recordBookIntro(
-                            bookKey = book.bookUrl,
-                            originalTitle = book.name,
-                            translatedTitle = uiState.displayBookName,
-                            originalIntro = intro,
-                            translatedIntro = translated,
-                        )
-                        tvIntro.text = translated
-                    }
-                }
-            }
         }
     }
 
@@ -1356,22 +1427,28 @@ class BookInfoActivity :
             }
 
             chapterList.isNullOrEmpty() -> {
+                val current = book
                 uiState = uiState.copy(
                     tocText = getString(
                         R.string.toc_s,
                         getString(R.string.error_load_toc),
                     ),
-                    latestText = getString(R.string.lasted_show, book?.latestChapterTitle),
+                    latestText = current?.let { formatLatestText(it) }
+                        ?: getString(R.string.lasted_show, null),
                 )
+                if (current != null) {
+                    applyBookHistoryTranslations(current)
+                }
             }
 
             else -> {
                 book?.let {
                     uiState = uiState.copy(
                         book = it.copy(),
-                        tocText = getString(R.string.toc_s, it.durChapterTitle),
-                        latestText = getString(R.string.lasted_show, it.latestChapterTitle),
+                        tocText = formatTocText(it),
+                        latestText = formatLatestText(it),
                     )
+                    applyBookHistoryTranslations(it)
                 }
             }
         }

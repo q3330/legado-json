@@ -58,6 +58,7 @@ import io.legado.app.help.gsyVideo.VideoDownloadProgress
 import io.legado.app.help.gsyVideo.VideoDownloadStatus
 import io.legado.app.ui.design.components.compose.NgDrawerDragHandle
 import io.legado.app.ui.design.components.compose.NgDrawerDragHandleVariant
+import io.legado.app.ui.design.components.compose.NgToolbarTranslateButton
 import kotlinx.coroutines.launch
 
 private val EpisodeDownloadGreen = Color(0xFF22C55E)
@@ -72,7 +73,7 @@ internal fun VideoEpisodeSheet(
     onSelect: (Int, Int) -> Unit,
     onDismiss: () -> Unit,
     translateTitle: (String) -> String = { it },
-    translateEnabled: Boolean = false,
+    isTranslating: Boolean = false,
     onToggleTranslate: (() -> Unit)? = null,
     downloadStates: Map<String, VideoDownloadProgress> = emptyMap(),
     episodeCacheKey: (BookChapter) -> String = { "${it.index}_${it.url}" },
@@ -183,11 +184,15 @@ internal fun VideoEpisodeSheet(
                             Spacer(Modifier.weight(1f))
                         }
                         if (onToggleTranslate != null) {
-                            EpisodeIcon(
-                                icon = R.drawable.ic_translate,
-                                label = if (translateEnabled) "关闭目录翻译" else "翻译剧集名称",
+                            NgToolbarTranslateButton(
+                                isTranslating = isTranslating,
                                 onClick = onToggleTranslate,
-                                active = translateEnabled,
+                                contentDescription = "翻译剧集名称",
+                                size = 48.dp,
+                                iconSize = 22.dp,
+                                cornerRadius = 10.dp,
+                                idleTint = colors.content,
+                                borderColor = colors.content,
                             )
                         }
                         EpisodeIcon(

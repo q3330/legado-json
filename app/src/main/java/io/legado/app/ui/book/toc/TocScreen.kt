@@ -34,6 +34,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -75,7 +76,8 @@ import io.legado.app.help.book.isImage
 import io.legado.app.help.book.isLocal
 import io.legado.app.help.book.isVideo
 import io.legado.app.help.config.NgThemeModeStore
-import io.legado.app.ui.book.explore.ExploreToolbarButton
+import io.legado.app.help.translate.BookTitleTranslator
+import io.legado.app.help.translate.TranslateHistoryStore
 import io.legado.app.ui.book.read.CatalogVipIcon
 import io.legado.app.ui.design.components.compose.NgBookCover
 import io.legado.app.ui.design.components.compose.NgExpandableActionMenu
@@ -92,6 +94,7 @@ import io.legado.app.ui.design.components.compose.NgLazyListFastScroller
 import io.legado.app.ui.design.components.compose.NgLazyListFastScrollerVariant
 import io.legado.app.ui.design.components.compose.NgMaterialRole
 import io.legado.app.ui.design.components.compose.NgPopupToggleState
+import io.legado.app.ui.design.components.compose.NgToolbarTranslateButton
 import io.legado.app.ui.design.components.compose.NgVisualSurface
 import io.legado.app.ui.design.theme.NgTheme
 import io.legado.app.ui.design.theme.rememberAppearanceDockSelectionColors
@@ -126,7 +129,7 @@ internal data class TocUiState(
     val loadWordCount: Boolean = false,
     val splitLongChapter: Boolean = false,
     val isLocalTxt: Boolean = false,
-    val translateCatalog: Boolean = false,
+    val isTranslating: Boolean = false,
     val translatedTitles: Map<String, String> = emptyMap(),
     val imageCacheProgress: Map<String, ChapterImageCacheProgress> = emptyMap(),
 )
@@ -301,16 +304,12 @@ private fun TocTopBar(
             onBack = { onEvent(TocUiEvent.Back) },
             modifier = Modifier.padding(horizontal = 10.dp),
             trailingContent = {
-                ExploreToolbarButton(
-                    iconRes = R.drawable.ic_translate,
-                    description = stringResource(R.string.explore_auto_translate),
-                    tint = if (state.translateCatalog) Color(NgTheme.colors.primary) else colorResource(R.color.ng_search_icon),
+                NgToolbarTranslateButton(
+                    isTranslating = state.isTranslating,
                     onClick = { onEvent(TocUiEvent.ToggleTranslate) },
-                    modifier = Modifier.background(
-                        if (state.translateCatalog) Color(NgTheme.colors.primary).copy(alpha = 0.13f)
-                        else Color.Transparent,
-                        RoundedCornerShape(10.dp),
-                    ),
+                    contentDescription = "翻译目录",
+                    idleTint = colorResource(R.color.ng_search_icon),
+                    borderColor = colorResource(R.color.primaryText),
                 )
                 NgFloatingToolbarActionButton(
                     iconRes = R.drawable.ic_search,
@@ -325,6 +324,11 @@ private fun TocTopBar(
 
 @Composable
 private fun TocBookIdentity(book: Book, compact: Boolean) {
+    val cacheRevision by BookTitleTranslator.cacheRevision.collectAsState()
+    val historyBooks by TranslateHistoryStore.booksFlow.collectAsState()
+    val displayName = remember(book.bookUrl, book.name, cacheRevision, historyBooks) {
+        BookTitleTranslator.resolveBookDisplayName(book.bookUrl, book.name)
+    }
     Row(
         modifier = Modifier.fillMaxWidth().padding(
             start = 14.dp,
@@ -342,11 +346,11 @@ private fun TocBookIdentity(book: Book, compact: Boolean) {
                 height = if (compact) 40.dp else 104.dp,
             ),
             coverRadius = if (compact) 6 else 8,
-            contentDescription = book.name,
+            contentDescription = displayName,
         )
         if (compact) {
             Text(
-                text = if (book.author.isBlank()) book.name else "${book.name} · ${book.author}",
+                text = if (book.author.isBlank()) displayName else "$displayName · ${book.author}",
                 modifier = Modifier.weight(1f),
                 color = Color(NgTheme.colors.onSurface),
                 fontSize = 15.sp,
@@ -360,7 +364,7 @@ private fun TocBookIdentity(book: Book, compact: Boolean) {
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             Text(
-                text = book.name,
+                text = displayName,
                 color = Color(NgTheme.colors.onSurface),
                 fontSize = 16.sp,
                 lineHeight = 22.sp,
@@ -622,6 +626,8 @@ private fun TocChapterPage(
             )
         }
     }
+    val cacheRevision by BookTitleTranslator.cacheRevision.collectAsState()
+    val historyBooks by TranslateHistoryStore.booksFlow.collectAsState()
     Box(Modifier.fillMaxSize()) {
         LazyColumn(
             state = listState,
@@ -634,10 +640,22 @@ private fun TocChapterPage(
                 contentType = { if (it.isVolume) "volume" else "chapter" },
             ) { row ->
                 val item = itemsByKey.getValue(row.url)
-                val resolvedTitle = if (state.translateCatalog) {
-                    state.translatedTitles[item.displayTitle] ?: item.displayTitle
-                } else {
-                    item.displayTitle
+                val resolvedTitle = remember(
+                    item.displayTitle,
+                    item.chapter.index,
+                    bookKey,
+                    state.translatedTitles,
+                    cacheRevision,
+                    historyBooks,
+                ) {
+                    state.translatedTitles[item.displayTitle]
+                        ?: TranslateHistoryStore.findOfflineChapterTitle(
+                            bookKey = bookKey,
+                            chapterIndex = item.chapter.index,
+                            originalChapterTitle = item.displayTitle,
+                        )
+                        ?: BookTitleTranslator.getCached(item.displayTitle)
+                        ?: item.displayTitle
                 }
                 val imgProgress = if (state.book?.isImage == true && !item.chapter.isVolume) {
                     state.imageCacheProgress[MangaChapterCacheTracker.key(bookKey, item.chapter.index)]

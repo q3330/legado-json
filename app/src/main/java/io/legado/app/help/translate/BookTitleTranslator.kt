@@ -1,53 +1,265 @@
 package io.legado.app.help.translate
 
-import androidx.core.text.HtmlCompat
-import com.google.gson.JsonArray
-import com.google.gson.JsonObject
+import android.os.Handler
+import android.os.Looper
 import com.google.gson.JsonParser
 import com.google.gson.reflect.TypeToken
 import io.legado.app.constant.AppLog
-import io.legado.app.data.appDb
+import io.legado.app.data.entities.SearchBook
 import io.legado.app.help.http.newCallStrResponse
 import io.legado.app.help.http.okHttpClient
 import io.legado.app.utils.GSON
-import io.legado.app.utils.MD5Utils
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers.IO
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import okhttp3.FormBody
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.RequestBody.Companion.toRequestBody
 import splitties.init.appCtx
 import java.io.File
 import java.net.URLEncoder
-import java.security.MessageDigest
-import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
+
+data class EngineHealthState(
+    val consecutiveFailures: Int = 0,
+    val cooldownUntilMs: Long = 0L,
+    val lastError: String = "",
+)
 
 object BookTitleTranslator {
 
     private const val MAX_CACHE_ENTRIES = 8000
-    private const val BING_TOKEN_TTL_MS = 8 * 60 * 1000L
     private const val BATCH_DELIMITER = "\n§§§\n"
-    private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
+    const val EXPLORE_TRANSLATE_BATCH_SIZE = 8
+    const val EXPLORE_TRANSLATE_STEP_SIZE = 2
 
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val persistScope = CoroutineScope(SupervisorJob() + IO)
     private val cacheFile by lazy { File(appCtx.filesDir, "translate_cache.json") }
     private val cache = ConcurrentHashMap<String, String>()
     private val cacheLoaded = AtomicBoolean(false)
     private val persistScheduled = AtomicBoolean(false)
 
-    private val bingTokenMutex = Mutex()
-    @Volatile
-    private var bingToken: String? = null
-    @Volatile
-    private var bingTokenAt: Long = 0L
+    private val inFlightMap = ConcurrentHashMap<String, CompletableDeferred<String?>>()
+    private val healthMap = ConcurrentHashMap<String, EngineHealthState>()
+    private val textEngineMap = ConcurrentHashMap<String, Pair<String, String>>()
+    private val lastSucceededEngine = AtomicReference<Pair<String, String>?>(null)
+    private val activeTranslationSessions = AtomicInteger(0)
+    private val modelLoadingCount = AtomicInteger(0)
+    private val _isLoadingModel = MutableStateFlow(false)
+    val isLoadingModel: StateFlow<Boolean> = _isLoadingModel.asStateFlow()
+    private val modelLoadingListeners = CopyOnWriteArraySet<() -> Unit>()
+    private val _healthRevision = MutableStateFlow(0)
+    val healthRevision: StateFlow<Int> = _healthRevision.asStateFlow()
+    private val _cacheRevision = MutableStateFlow(0)
+    val cacheRevision: StateFlow<Int> = _cacheRevision.asStateFlow()
+
+    fun addModelLoadingListener(listener: () -> Unit) {
+        modelLoadingListeners.add(listener)
+    }
+
+    fun removeModelLoadingListener(listener: () -> Unit) {
+        modelLoadingListeners.remove(listener)
+    }
+
+    private fun notifyModelLoadingChanged(loading: Boolean) {
+        if (_isLoadingModel.value == loading) return
+        _isLoadingModel.value = loading
+        if (modelLoadingListeners.isNotEmpty()) {
+            mainHandler.post {
+                modelLoadingListeners.forEach { it.invoke() }
+            }
+        }
+    }
+
+    internal inline fun <T> withModelLoading(block: () -> T): T {
+        beginModelLoading()
+        return try {
+            block()
+        } finally {
+            endModelLoading()
+        }
+    }
+
+    internal fun beginModelLoading() {
+        if (modelLoadingCount.incrementAndGet() > 0) {
+            notifyModelLoadingChanged(true)
+        }
+    }
+
+    internal fun endModelLoading() {
+        val left = modelLoadingCount.decrementAndGet()
+        if (left <= 0) {
+            modelLoadingCount.compareAndSet(left, 0)
+            notifyModelLoadingChanged(false)
+        }
+    }
+
+    /**
+     * 按页并按单次 5~10 本（默认 8 本）筛选发现页本次需要翻译的书名。
+     * 优先取当前正在浏览页（[currentPage]）尚未翻译的书籍；若当前页已全部翻译，
+     * 则顺延到从当前页往后第一个仍有未译书籍的已加载页（仅限单页，不跨页混合），每次最多取 [batchLimit] 本。
+     */
+    fun selectExplorePageBatchToTranslate(
+        books: List<SearchBook>,
+        bookPages: Map<String, Int>,
+        currentPage: Int,
+        firstLoadedPage: Int,
+        translatedNames: Map<String, String>,
+        batchLimit: Int = EXPLORE_TRANSLATE_BATCH_SIZE,
+    ): List<String> {
+        if (books.isEmpty()) return emptyList()
+        val fallbackPage = firstLoadedPage.coerceAtLeast(1)
+        val targetCurrentPage = currentPage.coerceAtLeast(fallbackPage)
+
+        fun isUntranslated(book: SearchBook): Boolean {
+            val name = book.name
+            return name !in translatedNames &&
+                resolveBookDisplayName(book.bookUrl, name) == name &&
+                needsTranslation(name)
+        }
+
+        val currentPageNames = books.asSequence()
+            .filter { (bookPages[it.bookUrl] ?: fallbackPage) == targetCurrentPage && isUntranslated(it) }
+            .map { it.name }
+            .distinct()
+            .take(batchLimit)
+            .toList()
+        if (currentPageNames.isNotEmpty()) return currentPageNames
+
+        val orderedPages = books.asSequence()
+            .map { bookPages[it.bookUrl] ?: fallbackPage }
+            .distinct()
+            .toList()
+        val nextPages = orderedPages.filter { it > targetCurrentPage } +
+            orderedPages.filter { it < targetCurrentPage }
+        for (page in nextPages) {
+            val pageNames = books.asSequence()
+                .filter { (bookPages[it.bookUrl] ?: fallbackPage) == page && isUntranslated(it) }
+                .map { it.name }
+                .distinct()
+                .take(batchLimit)
+                .toList()
+            if (pageNames.isNotEmpty()) return pageNames
+        }
+        return emptyList()
+    }
+
+    suspend fun <T> withTranslationSession(block: suspend () -> T): T {
+        activeTranslationSessions.incrementAndGet()
+        return try {
+            block()
+        } finally {
+            val remaining = activeTranslationSessions.decrementAndGet()
+            if (remaining <= 0) {
+                activeTranslationSessions.compareAndSet(remaining, 0)
+                releaseLocalModelsAsync()
+            }
+        }
+    }
+
+    fun releaseLocalModelsAsync() {
+        persistScope.launch {
+            if (activeTranslationSessions.get() <= 0) {
+                LocalHyMtTranslator.unloadAsync()
+                LocalNmtTranslator.unloadAllAsync()
+                MlKitTranslator.closeAllClientsAsync()
+            }
+        }
+    }
+
+    fun currentPrimaryEngine(): TranslateEngineItem? =
+        TranslateConfig.getEnabledEngines().firstOrNull()
+
+    fun currentPrimaryEngineId(): String =
+        currentPrimaryEngine()?.id ?: "default"
+
+    fun resolveEngineForText(
+        text: String?,
+        targetLang: String = TranslateConfig.targetLang,
+    ): Pair<String, String> {
+        val normalized = text?.trim().orEmpty()
+        if (normalized.isNotEmpty()) {
+            textEngineMap[engineTrackKey(normalized, targetLang)]?.let { return it }
+        }
+        lastSucceededEngine.get()?.let { return it }
+        val primary = currentPrimaryEngine()
+        return if (primary != null) {
+            primary.id to primary.name.ifBlank { primary.type.label }
+        } else {
+            "default" to ""
+        }
+    }
+
+    fun getEngineHealth(engineId: String): EngineHealthState? = healthMap[engineId]
+
+    fun isEngineInCooldown(engineId: String, now: Long = System.currentTimeMillis()): Boolean =
+        (healthMap[engineId]?.cooldownUntilMs ?: 0L) > now
+
+    fun cooldownRemainingSeconds(engineId: String): Long {
+        val remain = (healthMap[engineId]?.cooldownUntilMs ?: 0L) - System.currentTimeMillis()
+        return if (remain <= 0L) 0L else (remain + 999L) / 1000L
+    }
+
+    fun resetEngineCooldown(engineId: String) {
+        if (healthMap.remove(engineId) != null) {
+            _healthRevision.value += 1
+        }
+    }
+
+    fun resetAllCooldowns() {
+        if (healthMap.isNotEmpty()) {
+            healthMap.clear()
+            _healthRevision.value += 1
+        }
+    }
+
+    private fun recordEngineSuccess(engineId: String) {
+        if (healthMap.remove(engineId) != null) {
+            _healthRevision.value += 1
+        }
+    }
+
+    private fun recordEngineFailure(engineId: String, error: Throwable) {
+        val msg = error.localizedMessage ?: error.javaClass.simpleName
+        val isHardThrottle = msg.contains("429") ||
+            msg.contains("403") ||
+            msg.contains("rate limit", ignoreCase = true) ||
+            msg.contains("too many", ignoreCase = true) ||
+            msg.contains("timeout", ignoreCase = true) ||
+            msg.contains("timed out", ignoreCase = true) ||
+            msg.contains("超时") ||
+            msg.contains("验证") ||
+            msg.contains("captcha", ignoreCase = true)
+        val prev = healthMap[engineId] ?: EngineHealthState()
+        val failures = prev.consecutiveFailures + 1
+        val shouldCooldown = isHardThrottle || failures >= 2
+        val cooldownMs = if (shouldCooldown) {
+            when (failures) {
+                1 -> 2 * 60_000L
+                2 -> 5 * 60_000L
+                3 -> 10 * 60_000L
+                else -> 15 * 60_000L
+            }
+        } else {
+            prev.cooldownUntilMs
+        }
+        val until = if (shouldCooldown) System.currentTimeMillis() + cooldownMs else 0L
+        healthMap[engineId] = EngineHealthState(
+            consecutiveFailures = failures,
+            cooldownUntilMs = until,
+            lastError = msg,
+        )
+        _healthRevision.value += 1
+    }
 
     private fun ensureCacheLoaded() {
         if (!cacheLoaded.compareAndSet(false, true)) return
@@ -58,7 +270,15 @@ object BookTitleTranslator {
             val type = object : TypeToken<Map<String, String>>() {}.type
             val loaded: Map<String, String>? = GSON.fromJson(raw, type)
             loaded?.forEach { (k, v) ->
-                if (k.isNotBlank() && v.isNotBlank()) cache[k] = v
+                if (k.isNotBlank() && v.isNotBlank()) {
+                    val parts = k.split('\u0000')
+                    val migratedKey = if (parts.size == 2) {
+                        "preset_google\u0000$k"
+                    } else {
+                        k
+                    }
+                    cache[migratedKey] = v
+                }
             }
         }
     }
@@ -82,27 +302,115 @@ object BookTitleTranslator {
         }
     }
 
-    private fun cacheKey(text: String, targetLang: String): String = "$targetLang\u0000$text"
+    private fun engineTrackKey(text: String, targetLang: String): String = "$targetLang\u0000$text"
+
+    private fun cacheKey(
+        text: String,
+        targetLang: String,
+        engineId: String = currentPrimaryEngineId(),
+    ): String = "$engineId\u0000$targetLang\u0000$text"
 
     fun cacheSize(): Int {
         ensureCacheLoaded()
         return cache.size
     }
 
+    fun cacheSizeForEngine(engineId: String): Int {
+        ensureCacheLoaded()
+        val prefix = "$engineId\u0000"
+        return cache.keys.count { it.startsWith(prefix) }
+    }
+
     fun clearCache() {
         cache.clear()
+        textEngineMap.clear()
         cacheLoaded.set(true)
+        _cacheRevision.value += 1
         persistScope.launch {
             runCatching { if (cacheFile.exists()) cacheFile.delete() }
         }
+    }
+
+    fun clearCacheForEngine(engineId: String) {
+        ensureCacheLoaded()
+        val prefix = "$engineId\u0000"
+        val removed = cache.keys.filter { it.startsWith(prefix) }
+        removed.forEach { cache.remove(it) }
+        textEngineMap.entries.removeIf { it.value.first == engineId }
+        if (lastSucceededEngine.get()?.first == engineId) {
+            lastSucceededEngine.set(null)
+        }
+        if (removed.isNotEmpty()) {
+            _cacheRevision.value += 1
+            schedulePersist()
+        }
+    }
+
+    fun clearCacheEntriesForEngine(engineId: String, texts: Collection<String>) {
+        val targetTexts = texts.mapNotNull { it.trim().takeIf(String::isNotEmpty) }.toHashSet()
+        if (targetTexts.isEmpty()) return
+        ensureCacheLoaded()
+        val prefix = "$engineId\u0000"
+        val removedKeys = cache.keys.filter { key ->
+            key.startsWith(prefix) && key.substringAfterLast('\u0000') in targetTexts
+        }
+        removedKeys.forEach { cache.remove(it) }
+        textEngineMap.entries.removeIf { entry ->
+            entry.value.first == engineId && entry.key.substringAfter('\u0000') in targetTexts
+        }
+        if (removedKeys.isNotEmpty()) {
+            _cacheRevision.value += 1
+            schedulePersist()
+        }
+    }
+
+    fun updateCacheEntry(
+        engineId: String,
+        originalText: String,
+        translatedText: String,
+        targetLang: String = TranslateConfig.targetLang,
+    ) {
+        val orig = originalText.trim()
+        if (orig.isEmpty()) return
+        ensureCacheLoaded()
+        val clean = translatedText.trim()
+        val key = cacheKey(orig, targetLang, engineId)
+        val primaryId = currentPrimaryEngineId()
+        if (clean.isEmpty() || clean == orig) {
+            cache.remove(key)
+            if (primaryId != engineId) {
+                cache.remove(cacheKey(orig, targetLang, primaryId))
+            }
+        } else {
+            cache[key] = clean
+            if (primaryId != engineId) {
+                cache[cacheKey(orig, targetLang, primaryId)] = clean
+            }
+        }
+        _cacheRevision.value += 1
+        schedulePersist()
     }
 
     fun getCached(text: String?, targetLang: String = TranslateConfig.targetLang): String? {
         val normalized = text?.trim().orEmpty()
         if (normalized.isEmpty()) return null
         ensureCacheLoaded()
-        return cache[cacheKey(normalized, targetLang)]?.takeIf { it.isNotBlank() && it != normalized }
-            ?: TranslateHistoryStore.findOfflineTitle(normalized, targetLang)
+        val primaryId = currentPrimaryEngineId()
+        return cache[cacheKey(normalized, targetLang, primaryId)]?.takeIf { it.isNotBlank() && it != normalized }
+            ?: TranslateHistoryStore.findOfflineTitle(normalized, targetLang, engineId = primaryId)
+    }
+
+    fun resolveBookDisplayName(
+        bookKey: String?,
+        originalName: String,
+        targetLang: String = TranslateConfig.targetLang,
+    ): String {
+        val trimmed = originalName.trim()
+        if (trimmed.isEmpty()) return originalName
+        return TranslateHistoryStore.findOfflineBookTitle(bookKey, trimmed, targetLang)
+            ?.takeIf { it.isNotBlank() }
+            ?: getCached(trimmed, targetLang)?.takeIf { it.isNotBlank() }
+            ?: originalName
     }
 
     fun needsTranslation(text: String?, targetLang: String = TranslateConfig.targetLang): Boolean {
@@ -142,7 +450,9 @@ object BookTitleTranslator {
         if (trimmed.isEmpty()) return null
         getCached(trimmed, targetLang)?.let { return it }
         if (!needsTranslation(trimmed, targetLang)) return null
-        return translateBatch(listOf(trimmed), targetLang)[trimmed]
+        return withTranslationSession {
+            translateBatch(listOf(trimmed), targetLang)[trimmed]
+        }
     }
 
     suspend fun testEngine(
@@ -150,74 +460,166 @@ object BookTitleTranslator {
         sample: String,
         targetLang: String = TranslateConfig.targetLang,
     ): Result<String> = withContext(IO) {
-        runCatching {
-            val trimmed = sample.trim()
-            if (trimmed.isEmpty()) error("测试文本不能为空")
-            val resultMap = executeEngine(
-                engine = engine,
-                texts = listOf(trimmed),
-                lang = TranslateConfig.targetLangSpec(targetLang),
-            )
-            resultMap[trimmed]?.takeIf { it.isNotBlank() } ?: error("未返回译文")
+        withTranslationSession {
+            runCatching {
+                val trimmed = sample.trim()
+                if (trimmed.isEmpty()) error("测试文本不能为空")
+                val resultMap = executeEngine(
+                    engine = engine,
+                    texts = listOf(trimmed),
+                    lang = TranslateConfig.targetLangSpec(targetLang),
+                )
+                val dst = resultMap[trimmed]?.takeIf { it.isNotBlank() } ?: error("未返回译文")
+                recordEngineSuccess(engine.id)
+                dst
+            }
         }
     }
 
     suspend fun translateBatch(
         texts: List<String>,
         targetLang: String = TranslateConfig.targetLang,
+        onItemTranslated: ((String, String) -> Unit)? = null,
     ): Map<String, String> = withContext(IO) {
         ensureCacheLoaded()
+        val primaryId = currentPrimaryEngineId()
         val result = LinkedHashMap<String, String>()
-        val pending = LinkedHashSet<String>()
+        val owned = LinkedHashMap<String, CompletableDeferred<String?>>()
+        val awaited = LinkedHashMap<String, CompletableDeferred<String?>>()
+
         for (raw in texts) {
             val trimmed = raw.trim()
             if (trimmed.isEmpty()) continue
-            val cached = cache[cacheKey(trimmed, targetLang)]
+            val key = cacheKey(trimmed, targetLang, primaryId)
+            val cached = cache[key]
             if (!cached.isNullOrBlank()) {
-                if (cached != trimmed) result[trimmed] = cached
-            } else if (needsTranslation(trimmed, targetLang)) {
-                pending.add(trimmed)
+                if (cached != trimmed) {
+                    result[trimmed] = cached
+                    onItemTranslated?.invoke(trimmed, cached)
+                }
+                continue
             }
-        }
-        if (pending.isEmpty()) return@withContext result
+            if (!needsTranslation(trimmed, targetLang)) continue
+            if (trimmed in owned || trimmed in awaited) continue
 
-        val enabledEngines = TranslateConfig.getEnabledEngines()
-        if (enabledEngines.isEmpty()) return@withContext result
-
-        val lang = TranslateConfig.targetLangSpec(targetLang)
-        val chunks = chunkTexts(pending.toList(), maxItems = 15, maxChars = 2200)
-        var cacheDirty = false
-
-        for (chunk in chunks) {
-            var translated: Map<String, String> = emptyMap()
-            for (engine in enabledEngines) {
-                val attempt = runCatching {
-                    executeEngine(engine, chunk, lang)
-                }
-                val map = attempt.getOrNull()
-                if (!map.isNullOrEmpty()) {
-                    translated = map
-                    break
-                } else {
-                    attempt.exceptionOrNull()?.let { err ->
-                        AppLog.put("翻译引擎(${engine.name.ifBlank { engine.type.label }})失败：${err.localizedMessage}", err)
-                    }
-                }
-            }
-
-            translated.forEach { (origin, dst) ->
-                val cleanDst = dst.trim()
-                if (cleanDst.isNotEmpty()) {
-                    cache[cacheKey(origin, targetLang)] = cleanDst
-                    cacheDirty = true
-                    if (cleanDst != origin) {
-                        result[origin] = cleanDst
-                    }
-                }
+            val fresh = CompletableDeferred<String?>()
+            val existing = inFlightMap.putIfAbsent(key, fresh)
+            if (existing != null) {
+                awaited[trimmed] = existing
+            } else {
+                owned[trimmed] = fresh
             }
         }
 
-        if (cacheDirty) schedulePersist()
+        val ownedResults = HashMap<String, String>(owned.size)
+        if (owned.isNotEmpty()) {
+            withTranslationSession {
+                try {
+                    val enabledEngines = TranslateConfig.getEnabledEngines()
+                    if (enabledEngines.isNotEmpty()) {
+                        val lang = TranslateConfig.targetLangSpec(targetLang)
+                        val chunks = chunkTexts(owned.keys.toList(), maxItems = 15, maxChars = 2200)
+                        var cacheDirty = false
+
+                        for (chunk in chunks) {
+                            val now = System.currentTimeMillis()
+                            val candidates = enabledEngines
+                                .filterNot { isEngineInCooldown(it.id, now) }
+                                .ifEmpty {
+                                    enabledEngines.sortedBy { getEngineHealth(it.id)?.cooldownUntilMs ?: 0L }
+                                }
+                            var translated: Map<String, String> = emptyMap()
+                            var succeededEngine: TranslateEngineItem? = null
+                            val streamedInCurrentAttempt = HashSet<String>()
+                            for (engine in candidates) {
+                                streamedInCurrentAttempt.clear()
+                                val enginePairCandidate = engine.id to engine.name.ifBlank { engine.type.label }
+                                val attempt = runCatching {
+                                    executeEngine(engine, chunk, lang) { origin, dst ->
+                                        val cleanDst = dst.trim()
+                                        if (cleanDst.isNotEmpty() && streamedInCurrentAttempt.add(origin)) {
+                                            cache[cacheKey(origin, targetLang, primaryId)] = cleanDst
+                                            if (enginePairCandidate.first != primaryId) {
+                                                cache[cacheKey(origin, targetLang, enginePairCandidate.first)] = cleanDst
+                                            }
+                                            textEngineMap[engineTrackKey(origin, targetLang)] = enginePairCandidate
+                                            cacheDirty = true
+                                            ownedResults[origin] = cleanDst
+                                            _cacheRevision.value += 1
+                                            if (cleanDst != origin) {
+                                                result[origin] = cleanDst
+                                                onItemTranslated?.invoke(origin, cleanDst)
+                                            }
+                                        }
+                                    }
+                                }
+                                val map = attempt.getOrNull()
+                                if (!map.isNullOrEmpty()) {
+                                    recordEngineSuccess(engine.id)
+                                    translated = map
+                                    succeededEngine = engine
+                                    break
+                                } else {
+                                    attempt.exceptionOrNull()?.let { err ->
+                                        recordEngineFailure(engine.id, err)
+                                        AppLog.put(
+                                            "翻译引擎(${engine.name.ifBlank { engine.type.label }})失败：${err.localizedMessage}",
+                                            err,
+                                        )
+                                    }
+                                }
+                            }
+
+                            val enginePair = succeededEngine?.let {
+                                it.id to it.name.ifBlank { it.type.label }
+                            }
+                            if (enginePair != null) {
+                                lastSucceededEngine.set(enginePair)
+                            }
+
+                            translated.forEach { (origin, dst) ->
+                                val cleanDst = dst.trim()
+                                if (cleanDst.isNotEmpty()) {
+                                    val alreadyStreamed = origin in streamedInCurrentAttempt
+                                    cache[cacheKey(origin, targetLang, primaryId)] = cleanDst
+                                    if (enginePair != null) {
+                                        if (enginePair.first != primaryId) {
+                                            cache[cacheKey(origin, targetLang, enginePair.first)] = cleanDst
+                                        }
+                                        textEngineMap[engineTrackKey(origin, targetLang)] = enginePair
+                                    }
+                                    cacheDirty = true
+                                    ownedResults[origin] = cleanDst
+                                    if (cleanDst != origin) {
+                                        result[origin] = cleanDst
+                                        if (!alreadyStreamed) {
+                                            onItemTranslated?.invoke(origin, cleanDst)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (cacheDirty) {
+                            _cacheRevision.value += 1
+                            schedulePersist()
+                        }
+                    }
+                } finally {
+                    owned.forEach { (origin, deferred) ->
+                        inFlightMap.remove(cacheKey(origin, targetLang, primaryId), deferred)
+                        deferred.complete(ownedResults[origin])
+                    }
+                }
+            }
+        }
+
+        awaited.forEach { (origin, deferred) ->
+            val translated = runCatching { deferred.await() }.getOrNull()?.trim()
+            if (!translated.isNullOrEmpty() && translated != origin) {
+                result[origin] = translated
+                onItemTranslated?.invoke(origin, translated)
+            }
+        }
         result
     }
 
@@ -246,22 +648,21 @@ object BookTitleTranslator {
         engine: TranslateEngineItem,
         texts: List<String>,
         lang: TranslateTargetLang,
+        onItemTranslated: ((String, String) -> Unit)? = null,
     ): Map<String, String> {
         val normalized = engine.normalized()
         val effectiveLang = normalized.targetLang.takeIf { it.isNotBlank() }
             ?.let { TranslateConfig.targetLangSpec(it) }
             ?: lang
         val endpoint = normalized.endpoint
-        if (endpoint.contains("{{text}}")) {
-            return translateWithTemplateUrl(normalized, texts, effectiveLang)
+        if (normalized.type == TranslateProvider.GOOGLE && endpoint.contains("{{text}}")) {
+            return translateWithTemplateUrl(normalized, texts, effectiveLang, onItemTranslated)
         }
         return when (normalized.type) {
-            TranslateProvider.BING -> translateWithBing(normalized, texts, effectiveLang)
-            TranslateProvider.GOOGLE -> translateWithGoogle(normalized, texts, effectiveLang)
-            TranslateProvider.YOUDAO -> translateWithYoudao(normalized, texts, effectiveLang)
-            TranslateProvider.BAIDU -> translateWithBaidu(normalized, texts, effectiveLang)
-            TranslateProvider.DEEPL -> translateWithDeepL(normalized, texts, effectiveLang)
-            TranslateProvider.DICT_RULE -> translateWithDictRule(normalized, texts)
+            TranslateProvider.HY_MT_OFFLINE -> LocalHyMtTranslator.translate(normalized, texts, effectiveLang, onItemTranslated)
+            TranslateProvider.LOCAL_NMT -> LocalNmtTranslator.translate(normalized, texts, effectiveLang, onItemTranslated)
+            TranslateProvider.MLKIT_OFFLINE -> MlKitTranslator.translate(normalized, texts, effectiveLang, onItemTranslated)
+            TranslateProvider.GOOGLE -> translateWithGoogle(normalized, texts, effectiveLang, onItemTranslated)
         }
     }
 
@@ -269,6 +670,7 @@ object BookTitleTranslator {
         engine: TranslateEngineItem,
         texts: List<String>,
         lang: TranslateTargetLang,
+        onItemTranslated: ((String, String) -> Unit)? = null,
     ): Map<String, String> {
         val out = LinkedHashMap<String, String>()
         for (item in texts) {
@@ -277,9 +679,6 @@ object BookTitleTranslator {
                 .replace("{{to}}", URLEncoder.encode(lang.code, "UTF-8"))
             val resp = okHttpClient.newCallStrResponse {
                 url(url)
-                if (engine.apiKey.isNotBlank()) {
-                    header("Authorization", "Bearer ${engine.apiKey}")
-                }
             }
             if (!resp.isSuccessful()) error("自定义翻译请求失败(HTTP ${resp.code()})")
             val body = resp.body?.trim().orEmpty()
@@ -290,72 +689,9 @@ object BookTitleTranslator {
                     ?: json.get("result")?.asString
                     ?: json.getAsJsonArray("translations")?.firstOrNull()?.asJsonObject?.get("text")?.asString
             }.getOrNull()?.trim().orEmpty().ifBlank { body }
-            if (dst.isNotBlank()) out[item] = dst
-        }
-        return out
-    }
-
-    private suspend fun getBingAuthToken(): String {
-        val now = System.currentTimeMillis()
-        val existing = bingToken
-        if (!existing.isNullOrBlank() && now - bingTokenAt < BING_TOKEN_TTL_MS) {
-            return existing
-        }
-        return bingTokenMutex.withLock {
-            val now2 = System.currentTimeMillis()
-            val cached = bingToken
-            if (!cached.isNullOrBlank() && now2 - bingTokenAt < BING_TOKEN_TTL_MS) {
-                return@withLock cached
-            }
-            val resp = okHttpClient.newCallStrResponse {
-                url("https://edge.microsoft.com/translate/auth")
-                header(
-                    "User-Agent",
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 Edg/128.0.0.0"
-                )
-            }
-            val token = resp.body?.trim().orEmpty()
-            if (token.isEmpty() || !resp.isSuccessful()) {
-                error("获取必应翻译令牌失败(HTTP ${resp.code()})")
-            }
-            bingToken = token
-            bingTokenAt = System.currentTimeMillis()
-            token
-        }
-    }
-
-    private suspend fun translateWithBing(
-        engine: TranslateEngineItem,
-        texts: List<String>,
-        lang: TranslateTargetLang,
-    ): Map<String, String> {
-        val token = getBingAuthToken()
-        val payload = JsonArray().apply {
-            texts.forEach { text ->
-                add(JsonObject().apply { addProperty("Text", text) })
-            }
-        }.toString()
-        val base = engine.endpoint.ifBlank { TranslateProvider.BING.defaultEndpoint }.substringBefore('?')
-        val url = "$base?from=&to=${URLEncoder.encode(lang.bingCode, "UTF-8")}&api-version=3.0&includeSentenceLength=true"
-        val resp = okHttpClient.newCallStrResponse {
-            url(url)
-            header("Authorization", "Bearer $token")
-            header("Content-Type", "application/json")
-            post(payload.toRequestBody(jsonMediaType))
-        }
-        if (!resp.isSuccessful()) {
-            if (resp.code() == 401) bingToken = null
-            error("必应翻译请求失败(HTTP ${resp.code()})")
-        }
-        val body = resp.body?.trim().orEmpty()
-        val array = JsonParser.parseString(body).asJsonArray
-        val out = LinkedHashMap<String, String>()
-        for (i in texts.indices) {
-            if (i >= array.size()) break
-            val translations = array[i].asJsonObject.getAsJsonArray("translations")
-            val translated = translations?.firstOrNull()?.asJsonObject?.get("text")?.asString
-            if (!translated.isNullOrBlank()) {
-                out[texts[i]] = translated.trim()
+            if (dst.isNotBlank()) {
+                out[item] = dst
+                onItemTranslated?.invoke(item, dst)
             }
         }
         return out
@@ -365,11 +701,17 @@ object BookTitleTranslator {
         engine: TranslateEngineItem,
         texts: List<String>,
         lang: TranslateTargetLang,
+        onItemTranslated: ((String, String) -> Unit)? = null,
     ): Map<String, String> {
         val base = engine.endpoint.ifBlank { TranslateProvider.GOOGLE.defaultEndpoint }.substringBefore('?')
         if (texts.size == 1) {
             val single = translateSingleGoogle(base, texts.first(), lang)
-            return if (single.isNotBlank()) mapOf(texts.first() to single) else emptyMap()
+            return if (single.isNotBlank()) {
+                onItemTranslated?.invoke(texts.first(), single)
+                mapOf(texts.first() to single)
+            } else {
+                emptyMap()
+            }
         }
         val joined = texts.joinToString(BATCH_DELIMITER)
         val mergedResult = translateSingleGoogle(base, joined, lang)
@@ -378,14 +720,20 @@ object BookTitleTranslator {
             val out = LinkedHashMap<String, String>()
             for (i in texts.indices) {
                 val t = parts[i].trim()
-                if (t.isNotEmpty()) out[texts[i]] = t
+                if (t.isNotEmpty()) {
+                    out[texts[i]] = t
+                    onItemTranslated?.invoke(texts[i], t)
+                }
             }
             return out
         }
         val out = LinkedHashMap<String, String>()
         for (item in texts) {
             val translated = runCatching { translateSingleGoogle(base, item, lang) }.getOrNull()
-            if (!translated.isNullOrBlank()) out[item] = translated
+            if (!translated.isNullOrBlank()) {
+                out[item] = translated
+                onItemTranslated?.invoke(item, translated)
+            }
         }
         return out
     }
@@ -414,194 +762,5 @@ object BookTitleTranslator {
             }
         }
         return sb.toString().trim()
-    }
-
-    private suspend fun translateWithBaidu(
-        engine: TranslateEngineItem,
-        texts: List<String>,
-        lang: TranslateTargetLang,
-    ): Map<String, String> {
-        val appId = engine.apiKey.trim()
-        val secret = engine.apiSecret.trim()
-        if (appId.isBlank() || secret.isBlank()) {
-            error("请先配置百度翻译 AppID 与密钥")
-        }
-        val sanitized = texts.map { it.replace('\n', ' ').replace('\r', ' ') }
-        val q = sanitized.joinToString("\n")
-        val salt = System.currentTimeMillis().toString()
-        val sign = MD5Utils.md5Encode(appId + q + salt + secret) ?: ""
-        val form = FormBody.Builder()
-            .add("q", q)
-            .add("from", "auto")
-            .add("to", lang.baiduCode)
-            .add("appid", appId)
-            .add("salt", salt)
-            .add("sign", sign)
-            .build()
-        val resp = okHttpClient.newCallStrResponse {
-            url(engine.endpoint.ifBlank { TranslateProvider.BAIDU.defaultEndpoint })
-            post(form)
-        }
-        val body = resp.body?.trim().orEmpty()
-        val json = JsonParser.parseString(body).asJsonObject
-        json.get("error_code")?.asString?.let { code ->
-            val msg = json.get("error_msg")?.asString.orEmpty()
-            error("百度翻译错误($code): $msg")
-        }
-        val list = json.getAsJsonArray("trans_result") ?: return emptyMap()
-        val out = LinkedHashMap<String, String>()
-        for (i in texts.indices) {
-            if (i >= list.size()) break
-            val dst = list[i].asJsonObject.get("dst")?.asString?.trim()
-            if (!dst.isNullOrEmpty()) out[texts[i]] = dst
-        }
-        return out
-    }
-
-    private suspend fun translateWithYoudao(
-        engine: TranslateEngineItem,
-        texts: List<String>,
-        lang: TranslateTargetLang,
-    ): Map<String, String> {
-        val appKey = engine.apiKey.trim()
-        val appSecret = engine.apiSecret.trim()
-        if (appKey.isBlank() || appSecret.isBlank()) {
-            error("请先配置有道翻译 AppKey 与应用密钥")
-        }
-        val out = LinkedHashMap<String, String>()
-        for (item in texts) {
-            val salt = UUID.randomUUID().toString()
-            val curtime = (System.currentTimeMillis() / 1000L).toString()
-            val input = if (item.length <= 20) {
-                item
-            } else {
-                item.take(10) + item.length + item.takeLast(10)
-            }
-            val sign = sha256Hex(appKey + input + salt + curtime + appSecret)
-            val form = FormBody.Builder()
-                .add("q", item)
-                .add("from", "auto")
-                .add("to", lang.youdaoCode)
-                .add("appKey", appKey)
-                .add("salt", salt)
-                .add("sign", sign)
-                .add("signType", "v3")
-                .add("curtime", curtime)
-                .build()
-            val resp = okHttpClient.newCallStrResponse {
-                url(engine.endpoint.ifBlank { TranslateProvider.YOUDAO.defaultEndpoint })
-                post(form)
-            }
-            val body = resp.body?.trim().orEmpty()
-            val json = JsonParser.parseString(body).asJsonObject
-            val errorCode = json.get("errorCode")?.asString
-            if (errorCode != "0") {
-                error("有道翻译错误($errorCode)")
-            }
-            val translation = json.getAsJsonArray("translation")?.firstOrNull()?.asString?.trim()
-            if (!translation.isNullOrEmpty()) {
-                out[item] = translation
-            }
-        }
-        return out
-    }
-
-    private suspend fun translateWithDeepL(
-        engine: TranslateEngineItem,
-        texts: List<String>,
-        lang: TranslateTargetLang,
-    ): Map<String, String> {
-        val customEndpoint = engine.endpoint.trim()
-        val apiKey = engine.apiKey.trim()
-        val isOfficialDeepL = customEndpoint.isBlank() ||
-            customEndpoint.contains("api-free.deepl.com", ignoreCase = true) ||
-            customEndpoint.contains("api.deepl.com", ignoreCase = true)
-        if (!isOfficialDeepL) {
-            val out = LinkedHashMap<String, String>()
-            for (item in texts) {
-                val payload = JsonObject().apply {
-                    addProperty("text", item)
-                    addProperty("source_lang", "auto")
-                    addProperty("target_lang", lang.deeplCode.substringBefore('-'))
-                }.toString()
-                val resp = okHttpClient.newCallStrResponse {
-                    url(customEndpoint)
-                    if (apiKey.isNotBlank()) {
-                        header("Authorization", "Bearer $apiKey")
-                    }
-                    post(payload.toRequestBody(jsonMediaType))
-                }
-                if (!resp.isSuccessful()) {
-                    error("自定义翻译接口请求失败(HTTP ${resp.code()})")
-                }
-                val json = JsonParser.parseString(resp.body?.trim().orEmpty()).asJsonObject
-                val dst = json.get("data")?.asString?.trim()
-                    ?: json.get("translatedText")?.asString?.trim()
-                    ?: json.get("result")?.asString?.trim()
-                    ?: json.getAsJsonArray("translations")?.firstOrNull()?.asJsonObject?.get("text")?.asString?.trim()
-                if (!dst.isNullOrEmpty()) out[item] = dst
-            }
-            return out
-        }
-        if (apiKey.isBlank()) {
-            error("请先配置 DeepL Auth Key 或自定义 DeepLX 接口地址")
-        }
-        val endpoint = customEndpoint.ifBlank {
-            if (apiKey.endsWith(":fx")) "https://api-free.deepl.com/v2/translate"
-            else "https://api.deepl.com/v2/translate"
-        }
-        val payload = JsonObject().apply {
-            add("text", JsonArray().apply { texts.forEach(::add) })
-            addProperty("target_lang", lang.deeplCode)
-        }.toString()
-        val resp = okHttpClient.newCallStrResponse {
-            url(endpoint)
-            header("Authorization", "DeepL-Auth-Key $apiKey")
-            post(payload.toRequestBody(jsonMediaType))
-        }
-        if (!resp.isSuccessful()) {
-            error("DeepL 请求失败(HTTP ${resp.code()})")
-        }
-        val json = JsonParser.parseString(resp.body?.trim().orEmpty()).asJsonObject
-        val translations = json.getAsJsonArray("translations") ?: return emptyMap()
-        val out = LinkedHashMap<String, String>()
-        for (i in texts.indices) {
-            if (i >= translations.size()) break
-            val dst = translations[i].asJsonObject.get("text")?.asString?.trim()
-            if (!dst.isNullOrEmpty()) out[texts[i]] = dst
-        }
-        return out
-    }
-
-    private suspend fun translateWithDictRule(
-        engine: TranslateEngineItem,
-        texts: List<String>,
-    ): Map<String, String> {
-        val preferredName = engine.dictRuleName.trim()
-        val rule = if (preferredName.isNotBlank()) {
-            appDb.dictRuleDao.getByName(preferredName)
-        } else {
-            appDb.dictRuleDao.enabled.firstOrNull()
-        } ?: error("未找到可用的字典规则，请先在「字典规则」中启用规则")
-
-        val out = LinkedHashMap<String, String>()
-        for (item in texts) {
-            val raw = runCatching { rule.search(item) }.getOrNull().orEmpty()
-            val plain = HtmlCompat.fromHtml(raw, HtmlCompat.FROM_HTML_MODE_COMPACT)
-                .toString()
-                .lines()
-                .map { it.trim() }
-                .firstOrNull { it.isNotEmpty() }
-                .orEmpty()
-            if (plain.isNotEmpty()) {
-                out[item] = plain
-            }
-        }
-        return out
-    }
-
-    private fun sha256Hex(input: String): String {
-        val digest = MessageDigest.getInstance("SHA-256").digest(input.toByteArray(Charsets.UTF_8))
-        return digest.joinToString("") { "%02x".format(it) }
     }
 }

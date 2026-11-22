@@ -37,3 +37,4 @@ AGENTS.md
 __pycache__/
 *.pyc
 /outputs/
+/third_party/llama.cpp/

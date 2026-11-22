@@ -120,12 +120,11 @@ import io.legado.app.help.book.MangaChapterCacheTracker
 import io.legado.app.help.book.isImage
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.translate.BookTitleTranslator
-import io.legado.app.help.translate.TranslateConfig
+import io.legado.app.help.translate.TranslateHistoryStore
 import io.legado.app.model.ReadBook
 import io.legado.app.ui.book.bookmark.AllBookmarkFilter
 import io.legado.app.ui.book.bookmark.BookmarkNoteFilter
 import io.legado.app.ui.book.bookmark.buildAllBookmarkCollection
-import io.legado.app.ui.book.explore.ExploreToolbarButton
 import io.legado.app.ui.book.toc.TocViewModel
 import io.legado.app.ui.design.components.compose.LocalNgPaneBounds
 import io.legado.app.ui.design.components.compose.NgBottomDrawerSurface
@@ -138,6 +137,7 @@ import io.legado.app.ui.design.components.compose.NgMaterialRole
 import io.legado.app.ui.design.components.compose.NgLazyListFastScroller
 import io.legado.app.ui.design.components.compose.NgLazyListFastScrollerVariant
 import io.legado.app.ui.design.components.compose.NgLongDrawerHeader
+import io.legado.app.ui.design.components.compose.NgToolbarTranslateButton
 import io.legado.app.ui.design.theme.NgAppTheme
 import io.legado.app.ui.design.theme.NgTheme
 import io.legado.app.ui.design.theme.NgThemeSnapshot
@@ -145,6 +145,7 @@ import io.legado.app.utils.observeEvent
 import io.legado.app.utils.toastOnUi
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -961,16 +962,18 @@ private fun ReadCatalogPanel(
         }
     }
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val cacheRevision by BookTitleTranslator.cacheRevision.collectAsState()
+    val historyBooks by TranslateHistoryStore.booksFlow.collectAsState()
     val imageProgressStates by MangaChapterCacheTracker.states.collectAsState()
-    var translateCatalog by remember(book.bookUrl) {
-        mutableStateOf(TranslateConfig.isBookCatalogTranslateEnabled(book.bookUrl))
-    }
+    var isTranslating by remember(book.bookUrl) { mutableStateOf(false) }
+    var catalogTranslateJob by remember(book.bookUrl) { mutableStateOf<Job?>(null) }
     val translatedTitles = remember(book.bookUrl) { mutableStateMapOf<String, String>() }
-    val toggleCatalogTranslate: () -> Unit = {
-        val next = !translateCatalog
-        translateCatalog = next
-        TranslateConfig.setBookCatalogTranslateEnabled(book.bookUrl, next)
-        context.toastOnUi(if (next) "已开启目录翻译" else "已关闭目录翻译")
+    DisposableEffect(book.bookUrl) {
+        onDispose {
+            catalogTranslateJob?.cancel()
+            catalogTranslateJob = null
+        }
     }
     LaunchedEffect(book.bookUrl, dataVersion) {
         if (book.isImage) {
@@ -980,17 +983,58 @@ private fun ReadCatalogPanel(
             MangaChapterCacheTracker.syncBookChapters(book, allChapters)
         }
     }
+    val onTranslateCatalogOnce: () -> Unit = {
+        if (catalogTranslateJob?.isActive == true) {
+            catalogTranslateJob?.cancel()
+            catalogTranslateJob = null
+            isTranslating = false
+        } else {
+            val baseChapters = visibleOutline?.mapNotNull { outlineCache.get(it)?.chapter }
+                ?: outline?.mapNotNull { outlineCache.get(it)?.chapter }
+                ?: emptyList()
+            val titles = baseChapters.map { it.title.trim() }.filter { it.isNotEmpty() }.distinct()
+            baseChapters.forEach { ch ->
+                val raw = ch.title.trim()
+                val cached = TranslateHistoryStore.findOfflineChapterTitle(book.bookUrl, ch.index, raw)
+                    ?: BookTitleTranslator.getCached(raw)
+                if (cached != null && raw.isNotEmpty()) {
+                    translatedTitles[raw] = cached
+                }
+            }
+            val pending = titles.filter { it !in translatedTitles && BookTitleTranslator.needsTranslation(it) }
+            if (pending.isEmpty()) {
+                if (titles.isNotEmpty()) {
+                    context.toastOnUi("目录章节已全部翻译")
+                }
+            } else {
+                isTranslating = true
+                catalogTranslateJob = scope.launch {
+                    try {
+                        BookTitleTranslator.withTranslationSession {
+                            pending.chunked(30).forEach { batch ->
+                                val res = withContext(Dispatchers.IO) {
+                                    BookTitleTranslator.translateBatch(batch)
+                                }
+                                if (res.isNotEmpty()) {
+                                    translatedTitles.putAll(res)
+                                }
+                            }
+                        }
+                    } finally {
+                        isTranslating = false
+                    }
+                }
+            }
+        }
+    }
     val catalogHeaderAction: @Composable () -> Unit = {
         val translateAction: @Composable () -> Unit = {
-            ExploreToolbarButton(
-                iconRes = R.drawable.ic_translate,
-                description = stringResource(R.string.explore_auto_translate),
-                tint = if (translateCatalog) accentColor else contentColor,
-                onClick = toggleCatalogTranslate,
-                modifier = Modifier.background(
-                    if (translateCatalog) accentColor.copy(alpha = 0.14f) else Color.Transparent,
-                    RoundedCornerShape(10.dp),
-                ),
+            NgToolbarTranslateButton(
+                isTranslating = isTranslating,
+                onClick = onTranslateCatalogOnce,
+                contentDescription = "翻译目录",
+                idleTint = contentColor,
+                borderColor = contentColor,
             )
         }
         if (onReverseToc != null && selectedTab == CatalogTab.Chapters) {
@@ -1163,7 +1207,6 @@ private fun ReadCatalogPanel(
                                         volumeChildIndices = volumeChildIndices,
                                         isImageBook = book.isImage,
                                         imageProgressStates = imageProgressStates,
-                                        translateCatalog = translateCatalog,
                                         translatedTitles = translatedTitles,
                                     )
                                 }
@@ -1384,7 +1427,6 @@ private fun ReadCatalogPanel(
                             dense = denseList,
                             isImageBook = book.isImage,
                             imageProgressStates = imageProgressStates,
-                            translateCatalog = translateCatalog,
                             translatedTitles = translatedTitles,
                         )
                     } else {
@@ -1448,6 +1490,11 @@ private fun CatalogDragHandle(
 
 @Composable
 private fun CompactCatalogBookHeader(book: Book, contentColor: Color, mutedColor: Color) {
+    val cacheRevision by BookTitleTranslator.cacheRevision.collectAsState()
+    val historyBooks by TranslateHistoryStore.booksFlow.collectAsState()
+    val displayName = remember(book.bookUrl, book.name, cacheRevision, historyBooks) {
+        BookTitleTranslator.resolveBookDisplayName(book.bookUrl, book.name)
+    }
     Row(
         modifier = Modifier.fillMaxWidth().height(96.dp)
             .padding(start = 12.dp, end = 12.dp),
@@ -1457,11 +1504,11 @@ private fun CompactCatalogBookHeader(book: Book, contentColor: Color, mutedColor
             book = book,
             modifier = Modifier.size(width = 46.dp, height = 64.dp),
             coverRadius = 5,
-            contentDescription = book.name,
+            contentDescription = displayName,
         )
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
-            Text(book.name, color = contentColor, fontSize = 16.sp,
+            Text(displayName, color = contentColor, fontSize = 16.sp,
                 fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (book.author.isNotBlank()) {
                 Spacer(Modifier.height(5.dp))
@@ -1800,7 +1847,6 @@ private fun CatalogChapterList(
     volumeChildIndices: Set<Int> = emptySet(),
     isImageBook: Boolean = false,
     imageProgressStates: Map<String, ChapterImageCacheProgress> = emptyMap(),
-    translateCatalog: Boolean = false,
     translatedTitles: androidx.compose.runtime.snapshots.SnapshotStateMap<String, String>? = null,
 ) {
     var queriedItemCount by remember(query, descending) { mutableStateOf(0) }
@@ -1901,6 +1947,8 @@ private fun CatalogChapterList(
         CatalogEmptyState(stringResource(R.string.chapter_list_empty), mutedColor)
         return
     }
+    val cacheRevision by BookTitleTranslator.cacheRevision.collectAsState()
+    val historyBooks by TranslateHistoryStore.booksFlow.collectAsState()
     CatalogScrollableList(
         itemCount = itemCount,
         listState = listState,
@@ -1932,24 +1980,25 @@ private fun CatalogChapterList(
                     else if (compact) CompactCatalogPlaceholder(mutedColor)
                     else CatalogChapterPlaceholder(mutedColor)
                 } else {
-                    val resolvedTitle = if (translateCatalog) {
-                        val raw = item.displayTitle
-                        val cachedTr = translatedTitles?.get(raw) ?: BookTitleTranslator.getCached(raw)
-                        if (cachedTr != null) {
-                            cachedTr
-                        } else {
-                            if (translatedTitles != null && BookTitleTranslator.needsTranslation(raw)) {
-                                LaunchedEffect(raw, translateCatalog) {
-                                    if (!translateCatalog || raw in translatedTitles) return@LaunchedEffect
-                                    val tr = withContext(Dispatchers.IO) { BookTitleTranslator.translateText(raw) }
-                                    if (!tr.isNullOrBlank()) {
-                                        translatedTitles[raw] = tr
-                                    }
-                                }
-                            }
-                            raw
-                        }
-                    } else item.displayTitle
+                    val raw = item.displayTitle
+                    val translatedNow = translatedTitles?.get(raw)
+                    val resolvedTitle = remember(
+                        raw,
+                        item.chapter.index,
+                        bookUrl,
+                        translatedNow,
+                        cacheRevision,
+                        historyBooks,
+                    ) {
+                        translatedNow
+                            ?: TranslateHistoryStore.findOfflineChapterTitle(
+                                bookKey = bookUrl,
+                                chapterIndex = item.chapter.index,
+                                originalChapterTitle = raw,
+                            )
+                            ?: BookTitleTranslator.getCached(raw)
+                            ?: raw
+                    }
                     val imgProgress = if (isImageBook && !item.chapter.isVolume) {
                         imageProgressStates[MangaChapterCacheTracker.key(bookUrl, item.chapter.index)]
                     } else null

@@ -40,7 +40,7 @@ internal data class ExploreShowUiState(
     val selectedKind: io.legado.app.data.entities.rule.ExploreKind? = null,
     val books: List<SearchBook> = emptyList(),
     val translatedNames: Map<String, String> = emptyMap(),
-    val autoTranslateEnabled: Boolean = TranslateConfig.enabled,
+    val isTranslating: Boolean = false,
     val bookPages: Map<String, Int> = emptyMap(),
     val bookshelfKeys: Set<String> = emptySet(),
     val isKindsLoading: Boolean = true,
@@ -52,7 +52,9 @@ internal data class ExploreShowUiState(
     val firstLoadedPage: Int = 1,
     val lastLoadedPage: Int = 0,
     val hasMore: Boolean = true,
-    val selectionRevision: Long = 0L
+    val selectionRevision: Long = 0L,
+    val isSearchMode: Boolean = false,
+    val headerLabelOverride: String? = null,
 ) {
     val displayPage: Int
         get() = lastLoadedPage.takeIf { it > 0 } ?: firstLoadedPage
@@ -74,6 +76,7 @@ class ExploreShowViewModel(application: Application) : BaseViewModel(application
     private var contentJob: Job? = null
     private var translateJob: Job? = null
     private var contentRequestId = 0L
+    private var currentVisiblePage: Int = 1
     private data class FailedPage(val page: Int, val placement: Placement, val kindUrl: String)
     private var failedPage: FailedPage? = null
 
@@ -308,46 +311,102 @@ class ExploreShowViewModel(application: Application) : BaseViewModel(application
         jumpToPage(page)
     }
 
-    fun toggleAutoTranslate() {
-        val next = !TranslateConfig.enabled
-        TranslateConfig.enabled = next
-        _uiState.update { it.copy(autoTranslateEnabled = next) }
-        if (next) {
-            translateBooks(_uiState.value.books)
-        } else {
-            translateJob?.cancel()
+    fun onCurrentPageChanged(page: Int) {
+        if (page > 0) {
+            currentVisiblePage = page
         }
     }
 
-    private fun translateBooks(books: List<SearchBook>) {
-        if (!TranslateConfig.enabled || books.isEmpty()) return
+    fun translateCurrentBooksOnce() {
+        if (translateJob?.isActive == true) {
+            translateJob?.cancel()
+            translateJob = null
+            _uiState.update { it.copy(isTranslating = false) }
+            return
+        }
+        val stateSnapshot = _uiState.value
+        val books = stateSnapshot.books
+        if (books.isEmpty()) return
         val cached = buildMap {
             books.forEach { book ->
-                BookTitleTranslator.getCached(book.name)?.let { put(book.name, it) }
+                val resolved = BookTitleTranslator.resolveBookDisplayName(book.bookUrl, book.name)
+                if (resolved != book.name) {
+                    put(book.name, resolved)
+                }
+            }
+        }
+        val mergedTranslated = if (cached.isNotEmpty()) {
+            val next = stateSnapshot.translatedNames + cached
+            _uiState.update { it.copy(translatedNames = next) }
+            next
+        } else {
+            stateSnapshot.translatedNames
+        }
+        val namesToTranslate = BookTitleTranslator.selectExplorePageBatchToTranslate(
+            books = books,
+            bookPages = stateSnapshot.bookPages,
+            currentPage = currentVisiblePage,
+            firstLoadedPage = stateSnapshot.firstLoadedPage,
+            translatedNames = mergedTranslated,
+        )
+        if (namesToTranslate.isEmpty()) return
+        _uiState.update { it.copy(isTranslating = true) }
+        translateJob = viewModelScope.launch(IO) {
+            try {
+                BookTitleTranslator.withTranslationSession {
+                    namesToTranslate.chunked(BookTitleTranslator.EXPLORE_TRANSLATE_STEP_SIZE).forEach { batch ->
+                        val translated = BookTitleTranslator.translateBatch(batch) { origin, dst ->
+                            if (dst.isNotBlank() && dst != origin) {
+                                _uiState.value.books.forEach { book ->
+                                    if (book.name == origin) {
+                                        TranslateHistoryStore.recordBookTitle(
+                                            bookKey = book.bookUrl,
+                                            originalTitle = book.name,
+                                            translatedTitle = dst,
+                                        )
+                                    }
+                                }
+                                _uiState.update { state ->
+                                    if (state.translatedNames[origin] == dst) {
+                                        state
+                                    } else {
+                                        state.copy(translatedNames = state.translatedNames + (origin to dst))
+                                    }
+                                }
+                            }
+                        }
+                        if (translated.isNotEmpty()) {
+                            _uiState.value.books.forEach { book ->
+                                translated[book.name]?.let { translatedTitle ->
+                                    TranslateHistoryStore.recordBookTitle(
+                                        bookKey = book.bookUrl,
+                                        originalTitle = book.name,
+                                        translatedTitle = translatedTitle,
+                                    )
+                                }
+                            }
+                            _uiState.update { it.copy(translatedNames = it.translatedNames + translated) }
+                        }
+                    }
+                }
+            } finally {
+                _uiState.update { it.copy(isTranslating = false) }
+            }
+        }
+    }
+
+    private fun applyCachedBookTitles(books: List<SearchBook>) {
+        if (books.isEmpty()) return
+        val cached = buildMap {
+            books.forEach { book ->
+                val resolved = BookTitleTranslator.resolveBookDisplayName(book.bookUrl, book.name)
+                if (resolved != book.name) {
+                    put(book.name, resolved)
+                }
             }
         }
         if (cached.isNotEmpty()) {
             _uiState.update { it.copy(translatedNames = it.translatedNames + cached) }
-        }
-        val namesToTranslate = books.map { it.name }.distinct().filter {
-            it !in cached && BookTitleTranslator.needsTranslation(it)
-        }
-        if (namesToTranslate.isEmpty()) return
-        translateJob?.cancel()
-        translateJob = viewModelScope.launch(IO) {
-            val translated = BookTitleTranslator.translateBatch(namesToTranslate)
-            if (translated.isNotEmpty()) {
-                books.forEach { book ->
-                    translated[book.name]?.let { translatedTitle ->
-                        TranslateHistoryStore.recordBookTitle(
-                            bookKey = book.bookUrl,
-                            originalTitle = book.name,
-                            translatedTitle = translatedTitle,
-                        )
-                    }
-                }
-                _uiState.update { it.copy(translatedNames = it.translatedNames + translated) }
-            }
         }
     }
 
@@ -442,7 +501,7 @@ class ExploreShowViewModel(application: Application) : BaseViewModel(application
                     BookSourceReachabilityStore.markReachable(source.bookSourceUrl)
                 }
                 appDb.searchBookDao.insert(*searchBooks.toTypedArray())
-                translateBooks(merged)
+                applyCachedBookTitles(merged)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {

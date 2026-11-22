@@ -116,6 +116,9 @@ class RssFragment() : Fragment(), MainFragmentInterface {
                         onModernJumpToPage = ::jumpToModernRssPage,
                         onModernSelectLayoutStyle = ::setModernRssArticleStyle,
                         onModernOpenArticle = ::openModernArticle,
+                        onModernSearchQueryChange = ::updateModernSearchInput,
+                        onModernSearchSubmit = ::submitModernSearch,
+                        onModernExitSearch = ::exitModernSearch,
                         onQueryChange = ::updateSearchQuery,
                         onGroupSelected = ::selectGroup,
                         onOpenRuleSubscription = { startActivity<RuleSubActivity>() },
@@ -136,10 +139,17 @@ class RssFragment() : Fragment(), MainFragmentInterface {
         upRssFlowJob()
     }
 
+    private fun RssSource.supportsModernSearch(): Boolean {
+        return !singleUrl && !searchUrl.isNullOrBlank() && !ruleArticles.isNullOrBlank()
+    }
+
     private fun toggleModernStyle() {
         val next = !modernStyle
         modernStyle = next
         requireContext().putPrefBoolean(PREF_RSS_MODERN_STYLE, next)
+        if (searchQuery.isNotBlank()) {
+            upRssFlowJob()
+        }
         if (next) {
             ensureModernSourceSelected(sources, forceReload = false)
         }
@@ -181,7 +191,7 @@ class RssFragment() : Fragment(), MainFragmentInterface {
 
     private fun upRssFlowJob() {
         rssFlowJob?.cancel()
-        val query = searchQuery.trim()
+        val query = if (modernStyle) "" else searchQuery.trim()
         val group = selectedGroup
         rssFlowJob = viewLifecycleOwner.lifecycleScope.launch {
             when {
@@ -212,6 +222,14 @@ class RssFragment() : Fragment(), MainFragmentInterface {
         val currentUrl = modernState.selectedSourceUrl
         val keep = currentUrl?.let { url -> list.firstOrNull { it.sourceUrl == url } }
         if (keep != null) {
+            val canSearch = keep.supportsModernSearch()
+            if (modernState.canSearch != canSearch) {
+                if (!canSearch && modernState.isSearchMode) {
+                    selectModernSource(keep, forceReload = true)
+                    return
+                }
+                modernState = modernState.copy(canSearch = canSearch)
+            }
             if (forceReload || (!modernState.isWebMode && modernState.articles.isEmpty() && modernState.sorts.isEmpty() && !modernState.refreshing && !modernState.loadingMore && modernState.loadError == null)) {
                 selectModernSource(keep, forceReload = true)
             }
@@ -243,12 +261,79 @@ class RssFragment() : Fragment(), MainFragmentInterface {
             isWebMode = isWeb,
             refreshing = !isWeb,
             loadingMore = !isWeb,
+            canSearch = source.supportsModernSearch(),
+            searchInput = "",
+            activeSearchQuery = "",
+            isSearchMode = false,
         )
         if (isWeb) {
             loadModernWebSource(source)
         } else {
             loadModernArticleSource(source)
         }
+    }
+
+    private fun updateModernSearchInput(input: String) {
+        modernState = modernState.copy(searchInput = input)
+    }
+
+    private fun exitModernSearch() {
+        val source = sources.firstOrNull { it.sourceUrl == modernState.selectedSourceUrl }
+            ?: sources.firstOrNull()
+        modernLoadJob?.cancel()
+        modernPage = 1
+        modernNextUrl = null
+        modernState = modernState.copy(
+            isSearchMode = false,
+            activeSearchQuery = "",
+            searchInput = "",
+            articles = emptyList(),
+            page = 1,
+            hasMore = true,
+            loadError = null,
+        )
+        if (source == null || modernState.isWebMode) return
+        val sort = modernState.sorts.getOrNull(modernState.selectedSortIndex)
+        if (sort != null && sort.second.isNotBlank()) {
+            fetchModernArticles(source, sort.first, sort.second, page = 1, reset = true)
+        } else {
+            loadModernArticleSource(source)
+        }
+    }
+
+    private fun submitModernSearch(rawQuery: String) {
+        val source = sources.firstOrNull { it.sourceUrl == modernState.selectedSourceUrl }
+            ?: sources.firstOrNull()
+            ?: return
+        if (!source.supportsModernSearch()) return
+        val searchUrl = source.searchUrl?.takeIf(String::isNotBlank) ?: return
+        val keyword = rawQuery.trim()
+        if (keyword.isEmpty()) {
+            if (modernState.isSearchMode) {
+                exitModernSearch()
+            }
+            return
+        }
+        modernLoadJob?.cancel()
+        modernPage = 1
+        modernNextUrl = null
+        modernState = modernState.copy(
+            searchInput = keyword,
+            activeSearchQuery = keyword,
+            isSearchMode = true,
+            articles = emptyList(),
+            page = 1,
+            hasMore = true,
+            loadError = null,
+        )
+        fetchModernArticles(
+            source = source,
+            sortName = getString(R.string.search),
+            targetUrl = searchUrl,
+            page = 1,
+            reset = true,
+            searchKey = keyword,
+        )
     }
 
     private fun loadModernWebSource(source: RssSource) {
@@ -307,11 +392,13 @@ class RssFragment() : Fragment(), MainFragmentInterface {
     private fun selectModernSort(index: Int) {
         val source = sources.firstOrNull { it.sourceUrl == modernState.selectedSourceUrl } ?: return
         val sort = modernState.sorts.getOrNull(index) ?: return
-        if (sort.second.isBlank() || index == modernState.selectedSortIndex) return
+        if (sort.second.isBlank() || (index == modernState.selectedSortIndex && !modernState.isSearchMode)) return
         modernPage = 1
         modernNextUrl = null
         modernState = modernState.copy(
             selectedSortIndex = index,
+            isSearchMode = false,
+            activeSearchQuery = "",
             articles = emptyList(),
             page = 1,
             hasMore = true,
@@ -328,6 +415,20 @@ class RssFragment() : Fragment(), MainFragmentInterface {
             loadModernWebSource(source)
             return
         }
+        val activeSearch = modernState.activeSearchQuery.takeIf { modernState.isSearchMode && it.isNotBlank() }
+        val searchUrl = source.searchUrl?.takeIf(String::isNotBlank)
+        if (activeSearch != null && searchUrl != null) {
+            fetchModernArticles(
+                source = source,
+                sortName = getString(R.string.search),
+                targetUrl = searchUrl,
+                page = 1,
+                reset = true,
+                isPullRefresh = true,
+                searchKey = activeSearch,
+            )
+            return
+        }
         val sort = modernState.sorts.getOrNull(modernState.selectedSortIndex)
         if (sort != null && sort.second.isNotBlank()) {
             fetchModernArticles(source, sort.first, sort.second, page = 1, reset = true, isPullRefresh = true)
@@ -338,17 +439,47 @@ class RssFragment() : Fragment(), MainFragmentInterface {
 
     private fun loadMoreModernArticles() {
         val source = sources.firstOrNull { it.sourceUrl == modernState.selectedSourceUrl } ?: return
-        val sort = modernState.sorts.getOrNull(modernState.selectedSortIndex) ?: return
         val nextUrl = modernNextUrl?.takeIf(String::isNotBlank) ?: return
         if (modernState.loadingMore || modernState.refreshing || !modernState.hasMore) return
+        val activeSearch = modernState.activeSearchQuery.takeIf { modernState.isSearchMode && it.isNotBlank() }
+        if (activeSearch != null) {
+            fetchModernArticles(
+                source = source,
+                sortName = getString(R.string.search),
+                targetUrl = nextUrl,
+                page = modernPage + 1,
+                reset = false,
+                searchKey = activeSearch,
+            )
+            return
+        }
+        val sort = modernState.sorts.getOrNull(modernState.selectedSortIndex) ?: return
         fetchModernArticles(source, sort.first, nextUrl, page = modernPage + 1, reset = false)
     }
 
     private fun jumpToModernRssPage(page: Int) {
         val safePage = page.coerceAtLeast(1)
         val source = sources.firstOrNull { it.sourceUrl == modernState.selectedSourceUrl } ?: return
+        if (modernState.loadingMore || modernState.refreshing) return
+        val activeSearch = modernState.activeSearchQuery.takeIf { modernState.isSearchMode && it.isNotBlank() }
+        val searchUrl = source.searchUrl?.takeIf(String::isNotBlank)
+        if (activeSearch != null && searchUrl != null) {
+            if (safePage == modernPage + 1 && !modernNextUrl.isNullOrBlank()) {
+                loadMoreModernArticles()
+            } else {
+                fetchModernArticles(
+                    source = source,
+                    sortName = getString(R.string.search),
+                    targetUrl = searchUrl,
+                    page = safePage,
+                    reset = true,
+                    searchKey = activeSearch,
+                )
+            }
+            return
+        }
         val sort = modernState.sorts.getOrNull(modernState.selectedSortIndex) ?: return
-        if (sort.second.isBlank() || modernState.loadingMore || modernState.refreshing) return
+        if (sort.second.isBlank()) return
         if (safePage == modernPage + 1 && !modernNextUrl.isNullOrBlank()) {
             loadMoreModernArticles()
         } else {
@@ -375,6 +506,7 @@ class RssFragment() : Fragment(), MainFragmentInterface {
         page: Int,
         reset: Boolean,
         isPullRefresh: Boolean = false,
+        searchKey: String? = null,
     ) {
         val requestId = ++modernRequestId
         modernLoadJob?.cancel()
@@ -386,7 +518,7 @@ class RssFragment() : Fragment(), MainFragmentInterface {
         modernLoadJob = viewLifecycleOwner.lifecycleScope.launch {
             try {
                 val (articles, nextPageUrl) = withContext(IO) {
-                    Rss.getArticlesAwait(sortName, targetUrl, source, page, null)
+                    Rss.getArticlesAwait(sortName, targetUrl, source, page, searchKey)
                 }
                 if (requestId != modernRequestId) return@launch
                 RssSourceReachabilityStore.markReachable(source.sourceUrl)
@@ -405,7 +537,8 @@ class RssFragment() : Fragment(), MainFragmentInterface {
                 val fresh = ordered.filter { it.link !in existingLinks }
                 val merged = if (reset) ordered.distinctBy { it.link } else (previous + fresh)
                 modernPage = page
-                modernNextUrl = nextPageUrl?.takeIf { it.isNotBlank() && it != targetUrl }
+                val isPageRule = source.ruleNextPage.equals("PAGE", ignoreCase = true)
+                modernNextUrl = nextPageUrl?.takeIf { it.isNotBlank() && (isPageRule || it != targetUrl) }
                 val hasMore = !modernNextUrl.isNullOrBlank() && (reset || fresh.isNotEmpty())
                 modernState = modernState.copy(
                     articles = merged,

@@ -3,6 +3,7 @@ package io.legado.app.ui.rss.source.manage
 import android.app.Application
 import android.text.TextUtils
 import io.legado.app.base.BaseViewModel
+import io.legado.app.constant.AppPattern
 import io.legado.app.data.appDb
 import io.legado.app.data.entities.RssSource
 import io.legado.app.help.DefaultData
@@ -219,40 +220,43 @@ class RssSourceViewModel(application: Application) : BaseViewModel(application) 
     }
 
     fun addGroup(group: String) {
+        val trimmed = group.trim()
+        if (trimmed.isEmpty()) return
         execute {
-            val sources = appDb.rssSourceDao.noGroup
-            sources.forEach { source ->
-                source.sourceGroup = group
-            }
-            appDb.rssSourceDao.update(*sources.toTypedArray())
+            appDb.rssSourceDao.assignGroupToNoGroup(trimmed)
         }
     }
 
     fun upGroup(oldGroup: String, newGroup: String?) {
-        execute {
-            val sources = appDb.rssSourceDao.getByGroup(oldGroup)
-            sources.forEach { source ->
-                source.sourceGroup?.splitNotBlank(",")?.toHashSet()?.let {
-                    it.remove(oldGroup)
-                    if (!newGroup.isNullOrEmpty())
-                        it.add(newGroup)
-                    source.sourceGroup = TextUtils.join(",", it)
-                }
-            }
-            appDb.rssSourceDao.update(*sources.toTypedArray())
-        }
+        replaceGroup(oldGroup, newGroup)
     }
 
     fun delGroup(group: String) {
+        replaceGroup(group, null)
+    }
+
+    private fun replaceGroup(oldGroup: String, newGroup: String?) {
+        val target = oldGroup.trim()
+        if (target.isEmpty()) return
+        val replacement = newGroup?.trim()?.takeIf { it.isNotEmpty() }
         execute {
-            val sources = appDb.rssSourceDao.getByGroup(group)
-            sources.forEach { source ->
-                source.sourceGroup?.splitNotBlank(",")?.toHashSet()?.let {
-                    it.remove(group)
-                    source.sourceGroup = TextUtils.join(",", it).takeIf(String::isNotBlank)
+            val entries = appDb.rssSourceDao.allGroupEntries()
+            val updates = LinkedHashMap<String?, MutableList<String>>()
+            for (entry in entries) {
+                val rawGroup = entry.sourceGroup ?: continue
+                val set = rawGroup.splitNotBlank(AppPattern.splitGroupRegex).toCollection(linkedSetOf())
+                if (!set.remove(target)) continue
+                if (replacement != null) {
+                    set.add(replacement)
+                }
+                val updated = TextUtils.join(",", set).takeIf(String::isNotBlank)
+                if (updated != rawGroup) {
+                    updates.getOrPut(updated) { arrayListOf() }.add(entry.sourceUrl)
                 }
             }
-            appDb.rssSourceDao.update(*sources.toTypedArray())
+            if (updates.isNotEmpty()) {
+                appDb.rssSourceDao.upGroupBatch(updates)
+            }
         }
     }
 

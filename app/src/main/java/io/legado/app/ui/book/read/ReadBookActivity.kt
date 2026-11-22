@@ -50,10 +50,12 @@ import io.legado.app.help.book.BookHelp
 import io.legado.app.help.book.ContentProcessor
 import io.legado.app.help.book.isAudio
 import io.legado.app.help.book.isEpub
+import io.legado.app.help.book.isImage
 import io.legado.app.help.book.isLocal
 import io.legado.app.help.book.menuCapabilities
 import io.legado.app.help.book.isLocalTxt
 import io.legado.app.help.book.isMobi
+import io.legado.app.help.book.isVideo
 import io.legado.app.help.book.removeType
 import io.legado.app.help.book.update
 import io.legado.app.help.config.AppConfig
@@ -442,6 +444,13 @@ class ReadBookActivity : BaseReadBookActivity(),
         viewModel.resetReplaceRuleStateAfterResume()
         registerReceiver(timeBatteryReceiver, timeBatteryReceiver.filter)
         binding.readView.upTime()
+        binding.readMenu.upBookView()
+        ReadBook.curTextChapter?.let {
+            val currentPage = it.getPage(ReadBook.durPageIndex) ?: it.pages.firstOrNull()
+            if (currentPage != null) {
+                binding.readView.curPage.setProgress(currentPage)
+            }
+        }
         screenOffTimerStart()
         // 网络监听，当从无网切换到网络环境时同步进度（注意注册的同时就会收到监听，因此界面激活时无需重复执行同步操作）
         networkChangedListener.register()
@@ -731,13 +740,44 @@ class ReadBookActivity : BaseReadBookActivity(),
         showDownloadDialog()
     }
 
+    private var chapterTranslateJob: Job? = null
+
     override fun onHeaderTranslate() {
+        if (chapterTranslateJob?.isActive == true) {
+            chapterTranslateJob?.cancel()
+            chapterTranslateJob = null
+            binding.readMenu.setTranslating(false)
+            toastOnUi("已取消翻译")
+            return
+        }
         val book = ReadBook.book ?: return
-        val next = !io.legado.app.help.translate.TranslateConfig.isBookContentTranslateEnabled(book.bookUrl)
-        io.legado.app.help.translate.TranslateConfig.setBookContentTranslateEnabled(book.bookUrl, next)
-        binding.readMenu.updateTranslateIconState()
-        toastOnUi(if (next) "已开启正文自动翻译" else "已关闭正文自动翻译")
-        ReadBook.loadContent(resetPageOffset = false)
+        if (book.isImage || book.isAudio || book.isVideo) return
+        val targetBookUrl = book.bookUrl
+        val chapterIndex = ReadBook.durChapterIndex
+        binding.readMenu.setTranslating(true)
+        chapterTranslateJob = lifecycleScope.launch {
+            try {
+                val changed = withContext(IO) {
+                    ReadBook.translateCurrentChapterOnce(book, chapterIndex)
+                }
+                if (ReadBook.book?.bookUrl == targetBookUrl) {
+                    binding.readMenu.upBookView()
+                    if (changed && ReadBook.durChapterIndex == chapterIndex) {
+                        ReadBook.loadContent(chapterIndex, upContent = true, resetPageOffset = false)
+                    } else if (!changed) {
+                        ReadBook.curTextChapter?.let {
+                            val currentPage = it.getPage(ReadBook.durPageIndex) ?: it.pages.firstOrNull()
+                            if (currentPage != null) {
+                                binding.readView.curPage.setProgress(currentPage)
+                            }
+                        }
+                        toastOnUi("当前章节已有译文或无需翻译")
+                    }
+                }
+            } finally {
+                binding.readMenu.setTranslating(false)
+            }
+        }
     }
 
     private fun showChapterChangeSource() = lifecycleScope.launch {

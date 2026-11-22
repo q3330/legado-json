@@ -22,6 +22,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -39,6 +41,7 @@ import io.legado.app.ui.design.components.compose.NgExpandableActionMenuVariant
 import io.legado.app.ui.design.components.compose.NgPopupToggleState
 import io.legado.app.ui.design.components.compose.NgSearchBar
 import io.legado.app.ui.design.components.compose.NgSearchBarActionButton
+import io.legado.app.ui.design.components.compose.NgSearchBarTranslateButton
 import io.legado.app.ui.design.components.compose.NgSearchBarVariant
 import io.legado.app.ui.design.theme.NgTheme
 import io.legado.app.utils.firstDisplayGrapheme
@@ -64,19 +67,23 @@ internal fun ExploreTopBar(
     modernStyle: Boolean,
     currentSourceUrl: String? = null,
     currentSourceName: String = "",
-    autoTranslateEnabled: Boolean = false,
+    searchEnabled: Boolean = true,
+    isTranslating: Boolean = false,
     categoriesExpanded: Boolean = false,
     onOpenSourcePicker: () -> Unit = {},
-    onToggleAutoTranslate: () -> Unit = {},
+    onTranslateBooks: () -> Unit = {},
     onToggleCategories: () -> Unit = {},
     onCategoryAnchorPosition: (Float) -> Unit = {},
     onToggleModernStyle: () -> Unit,
     onQueryChange: (String) -> Unit,
+    onSearch: (String) -> Unit = {},
     onGroupSelected: (String?) -> Unit,
     onTypeSelected: (Int?) -> Unit,
     onLayoutModeChange: (ExploreLayoutMode) -> Unit,
     onManageSources: () -> Unit,
 ) {
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
     val menuState = remember { NgPopupToggleState() }
     val menuItems = remember(groups, selectedGroup, selectedType, layoutMode) {
         buildList {
@@ -102,6 +109,14 @@ internal fun ExploreTopBar(
                     titleRes = R.string.explore_view_group_grid,
                     iconRes = R.drawable.ic_folder_outline,
                     checked = layoutMode == ExploreLayoutMode.GROUP_GRID
+                )
+            )
+            add(
+                NgExpandableActionMenuItem(
+                    itemId = R.id.menu_source_manage,
+                    titleRes = R.string.book_source_manage,
+                    iconRes = R.drawable.ic_cfg_source,
+                    dividerBefore = true,
                 )
             )
             add(
@@ -165,14 +180,6 @@ internal fun ExploreTopBar(
                     )
                 }
             }
-            add(
-                NgExpandableActionMenuItem(
-                    itemId = R.id.menu_source_manage,
-                    titleRes = R.string.book_source_manage,
-                    iconRes = R.drawable.ic_cfg_source,
-                    dividerBefore = true,
-                )
-            )
         }
     }
 
@@ -192,25 +199,44 @@ internal fun ExploreTopBar(
             )
             Spacer(Modifier.width(spacerWidth))
         }
+        val effectiveSearchEnabled = !modernStyle || searchEnabled
+        val submitModernSearch: (String) -> Unit = { rawQuery ->
+            focusManager.clearFocus()
+            keyboardController?.hide()
+            if (modernStyle && searchEnabled) {
+                onSearch(rawQuery)
+            }
+        }
         NgSearchBar(
             query = query,
             onQueryChange = onQueryChange,
-            hint = if (modernStyle && currentSourceName.isNotBlank()) {
-                currentSourceName
-            } else {
-                stringResource(R.string.screen_find)
+            hint = when {
+                !modernStyle -> stringResource(R.string.screen_find)
+                !searchEnabled -> "当前源不支持搜索"
+                currentSourceName.isNotBlank() -> "搜索 $currentSourceName"
+                else -> stringResource(R.string.search)
             },
             modifier = Modifier.weight(1f),
+            enabled = effectiveSearchEnabled,
+            searchIcon = painterResource(
+                if (modernStyle && !searchEnabled) R.drawable.ic_lock_outline
+                else R.drawable.ic_search
+            ),
             variant = NgSearchBarVariant.TOOLBAR,
-            hideHintOnFocus = true
+            hideHintOnFocus = true,
+            onSearch = submitModernSearch,
+            onSearchIconClick = if (modernStyle && searchEnabled) {
+                { submitModernSearch(query) }
+            } else {
+                null
+            },
         )
         if (modernStyle) {
             Spacer(Modifier.width(spacerWidth))
-            NgSearchBarActionButton(
-                onClick = onToggleAutoTranslate,
-                contentDescription = stringResource(R.string.explore_auto_translate),
-                icon = painterResource(R.drawable.ic_translate),
-                tint = if (autoTranslateEnabled) Color(NgTheme.colors.primary) else null,
+            NgSearchBarTranslateButton(
+                isTranslating = isTranslating,
+                onClick = onTranslateBooks,
+                contentDescription = "翻译当前列表书名",
             )
             Spacer(Modifier.width(spacerWidth))
             NgSearchBarActionButton(

@@ -28,7 +28,7 @@ import io.legado.app.help.book.isVideo
 import io.legado.app.help.config.AppConfig
 import io.legado.app.help.exoplayer.AudioDownloadCache
 import io.legado.app.help.translate.BookTitleTranslator
-import io.legado.app.help.translate.TranslateConfig
+import io.legado.app.help.translate.TranslateHistoryStore
 import io.legado.app.model.ReadBook
 import io.legado.app.ui.about.AppLogDialog
 import io.legado.app.ui.about.NetworkLogDialog
@@ -111,9 +111,7 @@ class TocActivity : VMBaseActivity<ComposeActivityBinding, TocViewModel>(
     }
 
     private fun onBookChanged(book: Book) {
-        uiState = uiState.withBookSnapshot(book).copy(
-            translateCatalog = TranslateConfig.isBookCatalogTranslateEnabled(book.bookUrl),
-        )
+        uiState = uiState.withBookSnapshot(book)
         loadCachedFiles(book)
         if (viewModel.chapterOrderChanged) {
             setResult(RESULT_OK, Intent().apply {
@@ -235,47 +233,73 @@ class TocActivity : VMBaseActivity<ComposeActivityBinding, TocViewModel>(
                 if (book.isImage) {
                     MangaChapterCacheTracker.syncBookChapters(book, chapters)
                 }
-                if (uiState.translateCatalog) {
-                    translateChapterTitles(displayItems)
-                }
+                applyCachedChapterTitles(book.bookUrl, displayItems)
             }
+        }
+    }
+
+    private fun applyCachedChapterTitles(bookUrl: String, items: List<TocChapterUiItem>) {
+        if (items.isEmpty()) return
+        val merged = uiState.translatedTitles.toMutableMap()
+        var changed = false
+        items.forEach { item ->
+            val raw = item.displayTitle
+            val cached = TranslateHistoryStore.findOfflineChapterTitle(bookUrl, item.chapter.index, raw)
+                ?: BookTitleTranslator.getCached(raw)
+            if (cached != null && merged[raw] != cached) {
+                merged[raw] = cached
+                changed = true
+            }
+        }
+        if (changed) {
+            uiState = uiState.copy(translatedTitles = merged.toMap())
         }
     }
 
     private fun toggleCatalogTranslate() {
-        val book = viewModel.bookData.value ?: return
-        val next = !uiState.translateCatalog
-        TranslateConfig.setBookCatalogTranslateEnabled(book.bookUrl, next)
-        uiState = uiState.copy(translateCatalog = next)
-        toastOnUi(if (next) "已开启目录翻译" else "已关闭目录翻译")
-        if (next) {
-            translateChapterTitles(uiState.chapters)
-        } else {
+        if (translateJob?.isActive == true) {
             translateJob?.cancel()
+            translateJob = null
+            uiState = uiState.copy(isTranslating = false)
+            return
         }
+        translateChapterTitles(uiState.chapters)
     }
 
     private fun translateChapterTitles(items: List<TocChapterUiItem>) {
+        val bookUrl = viewModel.bookData.value?.bookUrl
         translateJob?.cancel()
         if (items.isEmpty()) return
+        val merged = uiState.translatedTitles.toMutableMap()
+        items.forEach { item ->
+            val raw = item.displayTitle
+            val cached = TranslateHistoryStore.findOfflineChapterTitle(bookUrl, item.chapter.index, raw)
+                ?: BookTitleTranslator.getCached(raw)
+            if (cached != null) merged[raw] = cached
+        }
+        if (merged.size != uiState.translatedTitles.size) {
+            uiState = uiState.copy(translatedTitles = merged.toMap())
+        }
+        val titles = items.map { it.displayTitle }.distinct()
+        val pending = titles.filter { it !in merged && BookTitleTranslator.needsTranslation(it) }
+        if (pending.isEmpty()) {
+            toastOnUi("目录章节已全部翻译")
+            return
+        }
+        uiState = uiState.copy(isTranslating = true)
         translateJob = lifecycleScope.launch {
-            val merged = uiState.translatedTitles.toMutableMap()
-            val titles = items.map { it.displayTitle }.distinct()
-            titles.forEach { t ->
-                BookTitleTranslator.getCached(t)?.let { merged[t] = it }
-            }
-            if (merged.size != uiState.translatedTitles.size) {
-                uiState = uiState.copy(translatedTitles = merged.toMap())
-            }
-            val pending = titles.filter { it !in merged && BookTitleTranslator.needsTranslation(it) }
-            if (pending.isEmpty()) return@launch
-            pending.chunked(30).forEach { batch ->
-                if (!uiState.translateCatalog) return@launch
-                val res = withContext(IO) { BookTitleTranslator.translateBatch(batch) }
-                if (res.isNotEmpty()) {
-                    merged.putAll(res)
-                    uiState = uiState.copy(translatedTitles = merged.toMap())
+            try {
+                BookTitleTranslator.withTranslationSession {
+                    pending.chunked(30).forEach { batch ->
+                        val res = withContext(IO) { BookTitleTranslator.translateBatch(batch) }
+                        if (res.isNotEmpty()) {
+                            merged.putAll(res)
+                            uiState = uiState.copy(translatedTitles = merged.toMap())
+                        }
+                    }
                 }
+            } finally {
+                uiState = uiState.copy(isTranslating = false)
             }
         }
     }
